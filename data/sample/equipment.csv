@@ -1,0 +1,6 @@
+EquipmentID,EquipmentName,Category,Description,Quantity,Unit,Location
+DEMO-EQ-001,Demo CAN Interface,Interface,Sample CAN interface used only for local demo,3,unit,Demo Cabinet A
+DEMO-EQ-002,Demo Debug Probe,Debug Tool,Sample debug probe used only for local demo,2,unit,Demo Cabinet A
+DEMO-EQ-003,Demo Measurement Unit,Measurement,Sample measurement unit used only for local demo,1,unit,Demo Lab Shelf
+DEMO-EQ-004,Demo Power Supply,Power Supply,Sample power supply used only for local demo,2,unit,Demo Cabinet B
+DEMO-EQ-005,Demo Control Board,Board,Sample control board used only for local demo,4,unit,Demo Cabinet C

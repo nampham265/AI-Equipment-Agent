@@ -1,0 +1,31 @@
+# Secrets and local configuration
+.env
+.env.*
+!.env.example
+
+# Local data, including real inventory exports and database files
+data/private/*
+!data/private/.gitkeep
+data/*.db
+data/*.sqlite
+data/*.sqlite3
+
+# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# JavaScript
+node_modules/
+dist/
+coverage/
+
+# OS/editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
