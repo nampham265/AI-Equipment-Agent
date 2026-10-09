@@ -173,8 +173,9 @@ def extract_constraints(text: str) -> ExtractedConstraints:
         elif any(k in raw_gen for k in ["male", "đực"]):
             constraints.gender = "male"
 
-    # Keywords (words other than standard query words and clean from trailing punctuation)
-    raw_tokens = re.findall(r"[A-Za-z0-9_À-ỹ]+", text.lower())
+    # Strip project phrase from text before extracting hardware keywords
+    clean_kw_text = re.sub(r"(?:cho\s+)?(?:project|dự\s*án)\s+[A-Za-z0-9_\-\.]+", "", text, flags=re.IGNORECASE)
+    raw_tokens = re.findall(r"[A-Za-z0-9_À-ỹ]+", clean_kw_text.lower())
     stop_words = {
         "cho", "mình", "xem", "danh", "sách", "tìm", "kiếm", "các", "có", "ở", "trong",
         "tủ", "bao", "nhiêu", "cái", "thế", "nào", "gì", "không", "những", "thông", "tin",
@@ -183,6 +184,7 @@ def extract_constraints(text: str) -> ExtractedConstraints:
         "đó", "ra", "sao", "giúp", "vậy", "nhỉ", "ạ", "nhé", "được", "khoảng", "tầm",
         "chiếc", "bộ", "con", "item", "items", "thì", "khi", "sử", "dụng", "hãy",
         "vui", "lòng", "hộ", "máy", "đồ", "ai", "nào", "chỉ", "thôi", "hỏi", "hãy",
+        "món", "thứ", "của", "tôi", "em", "bác", "project", "dự", "án",
     }
     keywords = [w for w in raw_tokens if w not in stop_words and len(w) > 1]
     constraints.keywords = keywords
@@ -217,12 +219,36 @@ class QueryRouter:
         plan.target_request_id = extract_request_id(norm_text)
         plan.constraints = extract_constraints(norm_text)
 
+        # Check explicit cancellation when there is an active pending action or user says xem thôi/hủy
+        if any(w in lower_text for w in [
+            "thôi", "hủy", "hủy bỏ", "không mượn nữa", "không trả nữa", "chỉ xem thôi", "mình muốn xem thôi", "xem thôi"
+        ]) and (
+            state.pending_action
+            or state.pending_form
+            or any(w in lower_text for w in ["không mượn", "không trả", "xem thôi", "hủy", "thôi"])
+        ):
+            plan.intent = IntentType.CANCEL_ACTION
+            return plan
+
         # 3. Context & Entity Resolution
         # 3.1 Ordinal resolution ("cái thứ 2", "đơn thứ 1")
         if plan.ordinal_index is not None and state.last_result_set:
             resolved_item = state_manager.get_item_by_ordinal(state, plan.ordinal_index)
             if resolved_item:
-                if state.last_result_type in ["request", "user_requests", "overdue_loans", "active_loans"]:
+                if (
+                    state.last_result_type == "borrowed_loans"
+                    or state.pending_action in ["return", "return_select"]
+                    or any(w in lower_text for w in ["trả", "hoàn trả"])
+                ):
+                    plan.intent = IntentType.RETURN_REQUEST
+                    plan.target_request_id = _extract_int_req_id(resolved_item)
+                    return plan
+                elif state.pending_action == "borrow_select":
+                    plan.intent = IntentType.REQUEST_CREATE
+                    plan.entity_id = str(resolved_item.get("EquipmentID") or resolved_item.get("equipment_id") or "")
+                    plan.entity_name = str(resolved_item.get("EquipmentName") or resolved_item.get("equipment_name") or "")
+                    return plan
+                elif state.last_result_type in ["request", "user_requests", "overdue_loans", "active_loans"]:
                     plan.intent = IntentType.REQUEST_DETAIL
                     plan.target_request_id = _extract_int_req_id(resolved_item)
                     return plan
@@ -329,9 +355,24 @@ class QueryRouter:
                 return plan
 
         # 3.3 Check general catalog list query first
-        if any(p in lower_text for p in ["danh sách trong kho", "các danh sách trong kho", "danh sách thiết bị", "tất cả thiết bị", "toàn bộ thiết bị", "trong kho có gì", "có những gì trong kho"]):
+        if any(p in lower_text for p in [
+            "danh sách trong kho", "các danh sách trong kho", "danh sách thiết bị",
+            "tất cả thiết bị", "toàn bộ thiết bị", "trong kho có gì", "có những gì trong kho",
+            "kho có gì", "kho đang có gì", "trong kho đang có gì", "trong kho có những gì",
+            "trong kho đang có những gì", "trong kho có những món gì", "trong kho đang có những món gì",
+            "kho có những món gì", "kho đang có những món gì", "trong kho có những thiết bị gì",
+            "trong kho đang có những thiết bị gì", "kho có những thiết bị gì", "kho đang có những thiết bị gì",
+            "những loại thiết bị nào", "có những loại thiết bị nào", "các loại thiết bị nào",
+            "có các loại thiết bị nào", "kho hiện có những loại thiết bị nào",
+            "trong kho hiện có những loại thiết bị nào",
+        ]) or (
+            any(w in lower_text for w in ["kho", "trong kho"])
+            and any(w in lower_text for w in ["có những", "đang có", "hiện có", "có các"])
+            and any(w in lower_text for w in ["món gì", "thiết bị gì", "loại thiết bị nào", "gì"])
+        ):
             plan.intent = IntentType.EQUIPMENT_SEARCH
             plan.entity_id = None
+            plan.entity_name = None
             plan.constraints = ExtractedConstraints()
             return plan
 

@@ -16,6 +16,7 @@ from app.agent.models import (
     QueryPlan,
 )
 from app.agent.normalizer import (
+    check_ask_auto_approve,
     extract_request_id,
     normalize_equipment_ids,
     normalize_units,
@@ -124,12 +125,26 @@ def _map_gemini_to_plan(
     if plan.ordinal_index is not None and state.last_result_set:
         resolved_item = state_manager.get_item_by_ordinal(state, plan.ordinal_index)
         if resolved_item:
-            if state.last_result_type in ["request", "user_requests", "overdue_loans", "active_loans"]:
+            if (
+                state.last_result_type == "borrowed_loans"
+                or state.pending_action in ["return", "return_select"]
+                or "trả" in raw_message.lower()
+                or plan.intent == IntentType.RETURN_REQUEST
+            ):
+                plan.intent = IntentType.RETURN_REQUEST
+                plan.target_request_id = _extract_int_req_id(resolved_item)
+            elif state.pending_action == "borrow_select":
+                plan.intent = IntentType.REQUEST_CREATE
+                plan.entity_id = str(resolved_item.get("EquipmentID") or resolved_item.get("equipment_id") or "")
+                plan.entity_name = str(resolved_item.get("EquipmentName") or resolved_item.get("equipment_name") or "")
+            elif state.last_result_type in ["request", "user_requests", "overdue_loans", "active_loans"]:
                 if plan.intent in [IntentType.EQUIPMENT_DETAIL, IntentType.UNKNOWN]:
                     plan.intent = IntentType.REQUEST_DETAIL
                 if not plan.target_request_id:
                     plan.target_request_id = _extract_int_req_id(resolved_item)
             elif state.last_result_type == "equipment":
+                if any(w in raw_message.lower() for w in ["bao nhiêu", "mấy cái", "số lượng", "còn không", "còn bao nhiêu"]):
+                    plan.intent = IntentType.EQUIPMENT_COUNT
                 if not plan.entity_id:
                     plan.entity_id = str(resolved_item.get("EquipmentID") or resolved_item.get("equipment_id") or "")
                     plan.entity_name = str(resolved_item.get("EquipmentName") or resolved_item.get("equipment_name") or "")
@@ -575,19 +590,27 @@ class AgentOrchestrator:
         eq_id = plan.entity_id
 
         # If user provided search keywords/constraints, search first instead of falling back to stale context
-        has_new_subject = bool(plan.constraints.keywords or plan.constraints.category or plan.constraints.location or plan.constraints.geometry or plan.constraints.color)
+        query_text = plan.entity_name or " ".join(plan.constraints.keywords) or plan.raw_message
+        has_new_subject = bool(plan.entity_name or plan.constraints.keywords or plan.constraints.category or plan.constraints.location or plan.constraints.geometry or plan.constraints.color)
         if not eq_id and has_new_subject:
-            matched = self.tools.search_equipment(plan.constraints, query=plan.raw_message)
+            matched = self.tools.search_equipment(plan.constraints, query=query_text)
             if len(matched) == 1:
                 eq_id = matched[0].equipment_id
             elif len(matched) > 1:
                 serialized_results = [_to_dict(r) for r in matched]
                 state_manager.set_result_set(state, serialized_results, result_type="equipment", page=1, page_size=15)
-                options = "\n".join([f"• `{it.get('equipment_id')}`: **{it.get('equipment_name')}**" for it in serialized_results])
-                return (
-                    f"Tôi tìm thấy nhiều thiết bị phù hợp với câu hỏi của bạn:\n\n{options}\n\n"
-                    f"Vui lòng cung cấp mã hoặc tên chính xác hơn để kiểm tra số lượng."
-                )
+                lines = [f"📊 Tìm thấy **{len(matched)}** thiết bị phù hợp trong kho:\n"]
+                for r in matched:
+                    c = self.tools.get_equipment_count(r.equipment_id)
+                    lines.append(
+                        f"• **{r.equipment_name}** (`{r.equipment_id}`): "
+                        f"Khả dụng **{c.get('available_quantity', 0)}** {c.get('unit', 'cái')} "
+                        f"(Tổng: {c.get('quantity_total', 0)} | Đang mượn: {c.get('borrowed_quantity', 0)} | Vị trí: {c.get('location', 'N/A')})"
+                    )
+                return "\n".join(lines)
+            elif len(matched) == 0:
+                clean_target = plan.entity_name or query_text
+                return f"Không tìm thấy thiết bị nào phù hợp với '{clean_target}' trong kho."
 
         # Fallback to active context if no new subject was provided
         if not eq_id:
@@ -679,6 +702,24 @@ class AgentOrchestrator:
         eq_id = plan.entity_id or (state.active_equipment.get("EquipmentID") if state.active_equipment else None)
         if not eq_id and state.active_equipment_ids:
             eq_id = state.active_equipment_ids[0]
+
+        if not eq_id:
+            search_query = plan.entity_name or " ".join(plan.constraints.keywords)
+            clean_search = re.sub(r"^(?:cho\s+)?(?:mình|em|tôi)?\s*(?:xem|hỏi)?\s*", "", search_query or "", flags=re.IGNORECASE).strip()
+            if clean_search:
+                matches = self.tools.search_equipment(plan.constraints, query=clean_search)
+                if len(matches) == 1:
+                    eq = matches[0]
+                    eq_id = eq.equipment_id
+                elif len(matches) > 1:
+                    serialized_results = [_to_dict(r) for r in matches]
+                    state_manager.set_result_set(state, serialized_results, result_type="equipment", page=1, page_size=15)
+                    lines = [f"📋 Tìm thấy **{len(matches)}** thiết bị phù hợp với '{clean_search}':\n"]
+                    for idx, it in enumerate(matches[:15], 1):
+                        lines.append(f"{idx}. **{it.equipment_name}** (`{it.equipment_id}`) — Vị trí: {it.location} | Số lượng: {it.quantity_total} {it.unit or 'cái'}")
+                    return "\n".join(lines)
+                elif len(matches) == 0:
+                    return f"Không tìm thấy thiết bị nào phù hợp với '{clean_search}' trong cơ sở dữ liệu."
 
         if not eq_id:
             return "Bạn muốn xem thông tin của thiết bị nào? Vui lòng cung cấp mã hoặc tên thiết bị."
@@ -863,11 +904,53 @@ class AgentOrchestrator:
         trace: AgentTrace,
     ) -> tuple[str, Optional[dict[str, Any]]]:
         trace.selected_tool = "create_borrow_request"
-        eq_id = plan.entity_id or (state.pending_form.equipment_id if state.pending_form else None)
-        if not eq_id and state.active_equipment:
+        eq_id = plan.entity_id or (state.pending_form.equipment_id if state.pending_form and state.pending_form.equipment_id else None)
+        if not eq_id and state.active_equipment and state.pending_action != "borrow_select":
             eq_id = state.active_equipment.get("EquipmentID")
-        if not eq_id and state.active_equipment_ids:
+        if not eq_id and state.active_equipment_ids and state.pending_action != "borrow_select":
             eq_id = state.active_equipment_ids[0]
+
+        # Inventory pre-check when equipment ID is not resolved
+        if not eq_id:
+            search_query = plan.entity_name or " ".join(plan.constraints.keywords)
+            clean_search = re.sub(
+                r"^(?:mình|tôi|em)?\s*(?:muốn|cần)?\s*mượn\s*",
+                "",
+                search_query or "",
+                flags=re.IGNORECASE,
+            ).strip()
+
+            if clean_search:
+                matches = self.tools.search_equipment(plan.constraints, query=clean_search)
+                if len(matches) == 1:
+                    eq_id = matches[0].equipment_id
+                elif len(matches) > 1:
+                    serialized_results = [_to_dict(r) for r in matches]
+                    state_manager.set_result_set(state, serialized_results, result_type="equipment", page=1, page_size=15)
+                    state.pending_action = "borrow_select"
+                    state.pending_form = PendingForm(
+                        equipment_id="",
+                        equipment_name="",
+                        quantity=plan.quantity or 1,
+                        needed_from=plan.needed_from,
+                        needed_to=plan.needed_to,
+                        project=plan.project or "",
+                        purpose=plan.purpose or "",
+                    )
+                    lines = [f"Tôi tìm thấy **{len(matches)}** thiết bị phù hợp với '{clean_search}' trong kho:\n"]
+                    for idx, c in enumerate(matches[:10], 1):
+                        lines.append(
+                            f"{idx}. **{c.equipment_name}** (`{c.equipment_id}`) — "
+                            f"Vị trí: {c.location} | Số lượng: {c.quantity_total} {c.unit or 'cái'}"
+                        )
+                    lines.append("\n*(Vui lòng chọn thiết bị bằng cách nhắn 'cái thứ 1', 'cái thứ 2' hoặc mã thiết bị để tiếp tục)*")
+                    return ("\n".join(lines), None)
+                elif len(matches) == 0:
+                    return (
+                        f"Không tìm thấy thiết bị nào phù hợp với '{clean_search}' trong kho để tạo yêu cầu mượn. "
+                        f"Bạn vui lòng kiểm tra lại tên hoặc đặc tính thiết bị.",
+                        None,
+                    )
 
         if not eq_id:
             action = {
@@ -881,29 +964,22 @@ class AgentOrchestrator:
             reply = "Tôi đã mở biểu mẫu đăng ký mượn thiết bị bên dưới. Vui lòng chọn thiết bị và điền thông tin chi tiết."
             return (reply, action)
 
+        state.pending_action = None
         eq = self.tools.get_equipment_detail(eq_id)
         eq_name = eq.equipment_name if eq else (state.active_equipment.get("EquipmentName") if state.active_equipment else eq_id)
 
-        # Merge or create pending form
-        if not state.pending_form:
-            state.pending_form = PendingForm(
-                equipment_id=eq_id,
-                equipment_name=eq_name,
-            )
-        else:
-            state.pending_form.equipment_id = eq_id
-            state.pending_form.equipment_name = eq_name
+        # Never leak or default project across unrelated requests
+        proj_val = plan.project or (state.pending_form.project if (state.pending_form and state.pending_form.project) else "")
 
-        if plan.quantity:
-            state.pending_form.quantity = plan.quantity
-        if plan.needed_from:
-            state.pending_form.needed_from = plan.needed_from
-        if plan.needed_to:
-            state.pending_form.needed_to = plan.needed_to
-        if plan.project:
-            state.pending_form.project = plan.project
-        if plan.purpose:
-            state.pending_form.purpose = plan.purpose
+        state.pending_form = PendingForm(
+            equipment_id=eq_id,
+            equipment_name=eq_name,
+            quantity=plan.quantity or (state.pending_form.quantity if state.pending_form and state.pending_form.quantity else 1),
+            needed_from=plan.needed_from or (state.pending_form.needed_from if state.pending_form else None),
+            needed_to=plan.needed_to or (state.pending_form.needed_to if state.pending_form else None),
+            project=proj_val,
+            purpose=plan.purpose or (state.pending_form.purpose if state.pending_form and state.pending_form.purpose else ""),
+        )
 
         # Check shortage if quantity provided and eq exists
         shortage_note = ""
@@ -1395,9 +1471,16 @@ class AgentOrchestrator:
                 None,
             )
 
-        # Ordinal resolution: "Tôi muốn trả cái thứ 2" against last borrowed_loans result set
         target_loan = None
-        if plan.ordinal_index is not None and state.last_result_type == "borrowed_loans" and state.last_result_set:
+
+        # 1. Target by request ID (direct in plan or resolved)
+        if plan.target_request_id:
+            matched = [r for r in active_loans if r.id == plan.target_request_id]
+            if matched:
+                target_loan = matched[0]
+
+        # 2. Ordinal resolution: "Tôi muốn trả cái thứ 1" against last borrowed_loans result set
+        if not target_loan and plan.ordinal_index is not None and state.last_result_type == "borrowed_loans" and state.last_result_set:
             item = state_manager.get_item_by_ordinal(state, plan.ordinal_index)
             if item:
                 req_id = item.get("id") or item.get("request_id")
@@ -1406,18 +1489,50 @@ class AgentOrchestrator:
                     if matched:
                         target_loan = matched[0]
 
-        # Equipment ID / name in message: "Tôi muốn trả TU1-001"
+        # 3. Equipment ID in message: "Tôi muốn trả TU1-001"
         if not target_loan and plan.entity_id:
             matched = [r for r in active_loans if r.equipment_id.upper() == plan.entity_id.upper()]
             if len(matched) == 1:
                 target_loan = matched[0]
+            elif len(matched) > 1:
+                active_loans = matched
 
-        # Exactly one active loan → auto-select
+        # 4. Target by equipment Name / attributes / keywords: "Mình muốn trả Conn 4.2mm"
+        if not target_loan:
+            cand_name = plan.entity_name or " ".join(plan.constraints.keywords)
+            clean_cand = re.sub(
+                r"^(?:mình|tôi|em)?\s*(?:muốn|cần)?\s*trả\s*",
+                "",
+                cand_name or "",
+                flags=re.IGNORECASE,
+            ).strip()
+
+            if clean_cand and len(clean_cand) >= 2:
+                norm_cand = clean_cand.lower()
+                tokens = [t for t in re.split(r"[\s\-_,]+", norm_cand) if t and t not in ["cái", "chiếc", "bộ", "đồ", "thiết", "bị"]]
+                matched_by_name = []
+                for r in active_loans:
+                    r_text = f"{r.equipment_id} {r.equipment_name} {r.project}".lower()
+                    if norm_cand in r_text:
+                        matched_by_name.append(r)
+                    elif tokens and all(t in r_text for t in tokens):
+                        matched_by_name.append(r)
+                    elif plan.constraints.size_mm and (f"{plan.constraints.size_mm}mm" in r_text or str(plan.constraints.size_mm) in r_text):
+                        if all(k.lower() in r_text for k in plan.constraints.keywords if len(k) > 1):
+                            matched_by_name.append(r)
+
+                if len(matched_by_name) == 1:
+                    target_loan = matched_by_name[0]
+                elif len(matched_by_name) > 1:
+                    active_loans = matched_by_name
+
+        # 5. Exactly one active loan overall → auto-select
         if not target_loan and len(active_loans) == 1:
             target_loan = active_loans[0]
 
         # One loan found → open return form
         if target_loan:
+            state.pending_action = None
             serialized_loans = [_to_dict(r) for r in active_loans]
             state_manager.set_result_set(
                 state,
@@ -1451,6 +1566,7 @@ class AgentOrchestrator:
             return (reply, action_payload)
 
         # Multiple loans → selection list
+        state.pending_action = "return"
         serialized_loans = [_to_dict(r) for r in active_loans]
         state_manager.set_result_set(
             state,

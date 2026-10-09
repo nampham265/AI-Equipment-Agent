@@ -153,11 +153,12 @@ class HybridRetrievalService:
 
         # If user specified specific search keywords, candidate MUST match distinctive keywords
         if c.keywords:
-            if "interface" in c.keywords and "interface" not in full_text:
+            c_kws_lower = [k.lower() for k in c.keywords]
+            if "interface" in c_kws_lower and "interface" not in full_text:
                 return False
-            if "banana" in c.keywords and "banana" not in full_text:
+            if "banana" in c_kws_lower and "banana" not in full_text:
                 return False
-            matched_kw_count = sum(1 for kw in c.keywords if kw in full_text)
+            matched_kw_count = sum(1 for kw in c_kws_lower if kw in full_text)
             if matched_kw_count == 0:
                 return False
 
@@ -176,13 +177,14 @@ class HybridRetrievalService:
 
         # Bonus for keywords
         if c.keywords:
-            matched_kws = [kw for kw in c.keywords if kw in full_text]
+            c_kws_lower = [k.lower() for k in c.keywords]
+            matched_kws = [kw for kw in c_kws_lower if kw in full_text]
             score += len(matched_kws) * 15.0
             # Extra bonus if ALL keywords match
             if len(matched_kws) == len(c.keywords) and len(c.keywords) > 1:
                 score += 40.0
             # Phrase bonus (e.g. "interface board" or "banana jumper")
-            phrase = " ".join(c.keywords)
+            phrase = " ".join(c_kws_lower)
             if phrase in full_text:
                 score += 50.0
 

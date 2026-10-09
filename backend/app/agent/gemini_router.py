@@ -26,7 +26,7 @@ Allowed intents (choose exactly one matching the user's primary goal):
 - equipment_detail: user asks for specifications, location, details of a specific equipment.
 - equipment_count: user asks how many units are available or remaining of an equipment.
 - equipment_exists: user asks if the warehouse has an equipment or checks inventory existence.
-- equipment_search: user searches or lists equipment based on attributes (connector, board, sensor, size, pins, category, location).
+- equipment_search: user searches or lists equipment based on attributes (connector, board, sensor, size, pins, category, location) or asks for general warehouse inventory/catalog (e.g. "trong kho có những món gì", "có những thiết bị gì", "có những loại thiết bị nào").
 - quantity_sufficiency: user asks if an equipment has enough for a requested quantity (e.g. "có đủ 50 cái không?").
 - alternative_search: user asks for replacement, substitute, similar alternative equipment (e.g. "loại nào tương tự", "thiết bị thay thế", "hết rồi có loại nào khác").
 - external_sourcing: user explicitly asks where to buy/purchase, external shops, pricing options outside the warehouse (e.g. "tìm nơi bán", "mua ở đâu", "shop nào có").

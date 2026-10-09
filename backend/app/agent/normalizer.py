@@ -176,9 +176,19 @@ def check_existence_query(text: str) -> Tuple[bool, Optional[str]]:
         "request", "yêu cầu", "đơn", "quá hạn", "trả trễ", "trễ hạn", "chậm trả", "trả muộn",
         "ai đang", "ai là", "ai", "thì sao", "thế nào", "trước đó", "trước đấy", "gần đây", "gần nhất",
         "thay thế", "tương đương", "thay cho", "nguồn bên ngoài", "mua ngoài",
-        "xung đột", "trùng lịch", "lịch"
+        "xung đột", "trùng lịch", "lịch", "những món gì", "những thiết bị gì",
+        "món gì", "thiết bị gì", "loại thiết bị nào", "loại nào", "những gì"
     ]):
         return False, None
+
+    # Exclude general listing queries
+    excluded_cand_terms = {
+        "gì", "những gì", "sao", "thế nào",
+        "món gì", "những món gì", "những món", "các món gì", "món",
+        "thiết bị gì", "những thiết bị gì", "các thiết bị gì", "thiết bị",
+        "loại gì", "loại thiết bị gì", "loại thiết bị nào", "những loại thiết bị nào",
+        "các loại thiết bị nào", "món nào", "thiết bị nào", "những thứ gì",
+    }
 
     # Pattern 1: Kho có <ENTITY> không? / Có <ENTITY> không?
     m1 = re.search(
@@ -189,7 +199,7 @@ def check_existence_query(text: str) -> Tuple[bool, Optional[str]]:
     if m1 and m1.group(1).strip():
         cand = m1.group(1).strip()
         cand = re.sub(r"^(?:cái|con|bộ)\s+", "", cand, flags=re.IGNORECASE).strip()
-        if cand and cand.lower() not in ["gì", "những gì", "sao", "thế nào"]:
+        if cand and cand.lower() not in excluded_cand_terms:
             return True, cand
 
     # Pattern 2: <ENTITY> có trong kho không? / <ENTITY> có không?
@@ -201,7 +211,7 @@ def check_existence_query(text: str) -> Tuple[bool, Optional[str]]:
     if m2 and m2.group(1).strip():
         cand = m2.group(1).strip()
         cand = re.sub(r"^(?:cái|con|bộ)\s+", "", cand, flags=re.IGNORECASE).strip()
-        if cand and cand.lower() not in ["gì", "những gì", "sao", "thế nào"]:
+        if cand and cand.lower() not in excluded_cand_terms:
             return True, cand
 
     return False, None

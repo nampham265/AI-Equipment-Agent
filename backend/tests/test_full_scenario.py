@@ -22,7 +22,9 @@ import app.repositories.factory as factory
 @pytest.fixture
 def scenario_app(tmp_path, monkeypatch):
     """Create a temporary copy of equipment_agent.xlsx and configure app to use it."""
-    orig_path = Path("data/equipment_agent.xlsx")
+    orig_path = Path(__file__).resolve().parent.parent / "data" / "equipment_agent.xlsx"
+    if not orig_path.exists():
+        orig_path = Path("data/equipment_agent.xlsx")
     test_wb_path = tmp_path / "scenario_equipment_agent.xlsx"
     shutil.copyfile(orig_path, test_wb_path)
 
