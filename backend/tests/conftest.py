@@ -1,6 +1,12 @@
 """Shared pytest fixtures (minimal - most tests use their own fixtures)."""
 from __future__ import annotations
 
+import os
+os.environ.setdefault("AGENT_ROUTING_MODE", "legacy_only")
+
+from app.core.config import settings
+settings.AGENT_ROUTING_MODE = os.environ.get("AGENT_ROUTING_MODE", "legacy_only")
+
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine

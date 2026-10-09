@@ -36,6 +36,10 @@ class Settings(BaseSettings):
     GEMINI_MODEL: str = "gemini-2.0-flash"
     ALLOW_INVENTORY_DATA_TO_GEMINI: bool = False
 
+    # Agent Routing & Capabilities Configuration
+    AGENT_ROUTING_MODE: str = "llm_primary"  # "llm_primary" | "llm_shadow" | "legacy_only"
+    ENABLE_EXTERNAL_SOURCING: bool = False
+
     # Microsoft Entra / Graph
     MICROSOFT_TENANT_ID: str = ""
     MICROSOFT_CLIENT_ID: str = ""

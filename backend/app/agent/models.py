@@ -20,8 +20,11 @@ class IntentType(str, Enum):
     AVAILABILITY_QUERY = "availability_query"
     USAGE_QUERY = "usage_query"
     PROJECT_USAGE_QUERY = "project_usage_query"
+    SCHEDULE_PLANNING = "schedule_planning"
     SCHEDULE_PLANNING_QUERY = "schedule_planning_query"
     EQUIPMENT_CONDITION_QUERY = "equipment_condition_query"
+    ALTERNATIVE_SEARCH = "alternative_search"
+    EXTERNAL_SOURCING = "external_sourcing"
     
     # Request intents
     REQUEST_CREATE = "request_create"
@@ -45,11 +48,65 @@ class IntentType(str, Enum):
     ACTIVE_BORROWERS = "active_borrowers"
     ACTIVE_BORROWERS_COUNT = "active_borrowers_count"
     SCHEDULE_CONFLICTS = "schedule_conflicts"
+    CONFLICT_BORROWERS = "conflict_borrowers"
     
     # Admin / System intents
     USER_MANAGEMENT = "user_management"
+    LIST_USERS = "list_users"
+    ADD_USER = "add_user"
+    CANCEL_ACTION = "cancel_action"
+    CLARIFICATION_REQUIRED = "clarification_required"
     HELP = "help"
     UNKNOWN = "unknown"
+
+
+class LLMEquipmentEntity(BaseModel):
+    equipment_id: Optional[str] = None
+    equipment_name: Optional[str] = None
+
+
+class LLMRequestEntity(BaseModel):
+    request_id: Optional[int] = None
+    quantity: Optional[int] = None
+    project: Optional[str] = None
+    purpose: Optional[str] = None
+    needed_from: Optional[str] = None
+    needed_to: Optional[str] = None
+    negate_borrow: bool = False
+
+
+class LLMConstraints(BaseModel):
+    category: Optional[str] = None
+    geometry: Optional[str] = None
+    size_mm: Optional[float] = None
+    pins: Optional[int] = None
+    location: Optional[str] = None
+    color: Optional[str] = None
+    gender: Optional[str] = None
+    keywords: list[str] = Field(default_factory=list)
+
+
+class LLMReference(BaseModel):
+    type: Optional[str] = "none"  # "none" | "active_equipment" | "active_request" | "previous_result" | "group_people" | "group_requests"
+    ordinal_index: Optional[int] = None
+    is_pronoun: bool = False
+    is_group: bool = False
+    is_group_reference: bool = False
+
+
+class GeminiRouterOutput(BaseModel):
+    intent: str
+    confidence: float = 1.0
+    equipment: LLMEquipmentEntity = Field(default_factory=LLMEquipmentEntity)
+    request: LLMRequestEntity = Field(default_factory=LLMRequestEntity)
+    constraints: LLMConstraints = Field(default_factory=LLMConstraints)
+    reference: LLMReference = Field(default_factory=LLMReference)
+    external_search_requested: bool = False
+    is_negation_or_cancellation: bool = False
+    action_cancelled: bool = False
+    clarification_needed: bool = False
+    clarification_reason: Optional[str] = None
+    reasoning: Optional[str] = None
 
 
 class ExtractedConstraints(BaseModel):
@@ -145,6 +202,12 @@ class AgentTrace(BaseModel):
     tool_result_count: int = 0
     selected_result_ids: list[str] = Field(default_factory=list)
     fallback_reason: Optional[str] = None
+    routing_mode: str = "legacy_fallback"  # "llm_primary" | "llm_shadow" | "legacy_fallback"
+    llm_router_called: bool = False
+    llm_input_summary: Optional[str] = None
+    llm_raw_json: Optional[str] = None
+    llm_intent: Optional[str] = None
+    fallback_used: bool = False
     response_type: str = "grounded"  # "grounded", "table", "form", "clarification", "unsupported"
     response_mode: str = "grounded"  # "grounded", "fallback", "clarification", "unsupported"
     timestamp: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())

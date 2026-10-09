@@ -227,7 +227,10 @@ class QueryRouter:
                     plan.target_request_id = _extract_int_req_id(resolved_item)
                     return plan
                 elif state.last_result_type == "equipment":
-                    plan.intent = IntentType.EQUIPMENT_DETAIL
+                    if any(w in lower_text for w in ["bao nhiêu", "mấy cái", "số lượng", "còn không", "còn bao nhiêu"]):
+                        plan.intent = IntentType.EQUIPMENT_COUNT
+                    else:
+                        plan.intent = IntentType.EQUIPMENT_DETAIL
                     plan.entity_id = str(resolved_item.get("EquipmentID") or resolved_item.get("equipment_id") or "")
                     plan.entity_name = str(resolved_item.get("EquipmentName") or resolved_item.get("equipment_name") or "")
                     return plan
@@ -236,23 +239,27 @@ class QueryRouter:
                     plan.target_request_id = _extract_int_req_id(resolved_item)
                     return plan
                 elif any(w in lower_text for w in ["cái", "thiết bị", "con"]):
-                    plan.intent = IntentType.EQUIPMENT_DETAIL
+                    if any(w in lower_text for w in ["bao nhiêu", "mấy cái", "số lượng", "còn không", "còn bao nhiêu"]):
+                        plan.intent = IntentType.EQUIPMENT_COUNT
+                    else:
+                        plan.intent = IntentType.EQUIPMENT_DETAIL
                     plan.entity_id = str(resolved_item.get("EquipmentID") or resolved_item.get("equipment_id") or "")
                     plan.entity_name = str(resolved_item.get("EquipmentName") or resolved_item.get("equipment_name") or "")
                     return plan
 
         # 3.2 Group & Reference Resolvers
-        # 3.2.1 Group reference to borrowers/people ("những người đó là ai", "những người đó", "mấy người đó", "họ là ai")
+        # 3.2.1 Group reference to borrowers/people ("những người đó là ai", "những người đó", "mấy người đó", "họ là ai", "những người nào bị xung đột")
         is_group_people = (
             any(p in lower_text for p in [
                 "những người đó", "mấy người đó", "các người đó", "những người này", "mấy người này",
                 "các người này", "họ là ai", "những ai vậy", "danh sách người đó", "danh sách những người đó",
                 "người đó là ai", "những ai đang mượn", "những người mượn đó", "ai đang mượn các đơn đó",
-                "những ai mượn", "ai mượn vậy", "ai đang giữ vậy", "ai vậy", "những người mượn này"
+                "những ai mượn", "ai mượn vậy", "ai đang giữ vậy", "ai vậy", "những người mượn này",
+                "những người nào bị xung đột", "ai bị xung đột", "những người bị xung đột", "người bị xung đột"
             ])
             or (
-                any(w in lower_text for w in ["người đó", "mấy người", "những người", "những ai", "họ"])
-                and any(w in lower_text for w in ["là ai", "danh sách", "ai", "thế", "nào"])
+                any(w in lower_text for w in ["người đó", "mấy người", "những người", "những ai", "họ", "người nào"])
+                and any(w in lower_text for w in ["là ai", "danh sách", "ai", "thế", "nào", "xung đột"])
             )
         )
         if is_group_people:
@@ -262,6 +269,9 @@ class QueryRouter:
                 return plan
             elif state.last_result_type in ["active_loans", "active_borrowers"] or state.last_intent in [IntentType.ACTIVE_LOANS, IntentType.ACTIVE_BORROWERS]:
                 plan.intent = IntentType.ACTIVE_BORROWERS
+                return plan
+            elif state.last_result_type in ["schedule_conflicts", "conflict_pairs"] or state.last_intent == IntentType.SCHEDULE_CONFLICTS:
+                plan.intent = IntentType.CONFLICT_BORROWERS
                 return plan
             elif state.last_result_type == "request" and state.last_result_set:
                 plan.intent = IntentType.ACTIVE_BORROWERS
@@ -632,30 +642,45 @@ class QueryRouter:
             return plan
 
         # 6.7 Unsupported Hardware Queries: Project usage, Return time, Condition, Scheduling
-        # Scheduling conflict / optimization
-        if any(p in lower_text for p in ["sắp xếp lịch", "điều phối lịch", "xếp lịch", "sắp xếp lại lịch"]):
-            plan.intent = IntentType.SCHEDULE_PLANNING_QUERY
+        # 6.6 Cancellation
+        if any(p in lower_text for p in ["hủy bỏ", "hủy thao tác", "thôi không cần", "thôi không mượn", "bỏ qua", "dừng lại"]) or lower_text.strip() in ["hủy", "cancel", "thôi", "bỏ"]:
+            plan.intent = IntentType.CANCEL_ACTION
             return plan
 
-        # Condition & Damage
+        # 6.7 Alternative Search
+        if any(p in lower_text for p in ["thiết bị thay thế", "thay thế cho", "tìm thiết bị thay thế", "tìm thay thế", "loại nào tương tự", "tương đương với", "alternative"]):
+            plan.intent = IntentType.ALTERNATIVE_SEARCH
+            return plan
+
+        # 6.8 External Sourcing
+        if any(p in lower_text for p in ["tìm nguồn bên ngoài", "nguồn bên ngoài", "tìm bên ngoài", "mua ngoài", "order ngoài", "external sourcing", "sourcing ngoài", "mua ở ngoài"]):
+            plan.intent = IntentType.EXTERNAL_SOURCING
+            return plan
+
+        # 6.9 Project usage, Return time, Condition, Scheduling
+        if any(p in lower_text for p in ["sắp xếp lịch", "điều phối lịch", "xếp lịch", "sắp xếp lại lịch", "lịch trình mượn"]):
+            plan.intent = IntentType.SCHEDULE_PLANNING
+            return plan
+
         if any(p in lower_text for p in ["tình trạng", "còn mới", "hư hỏng", "hỏng hóc", "hỏng không", "hoạt động tốt", "cũ hay mới", "chất lượng", "thiệt hại", "báo hỏng"]):
             plan.intent = IntentType.EQUIPMENT_CONDITION_QUERY
             return plan
 
-        # Return time
         if any(p in lower_text for p in ["khi nào trả", "thời gian trả", "bao giờ trả", "lúc nào trả", "khi nào nhận lại", "bao giờ nhận lại", "khi nào có lại", "nhận lại"]):
             plan.intent = IntentType.USAGE_QUERY
             return plan
 
-        # Project usage (Equipment domain)
         if (plan.entity_id or state.last_result_type == "equipment") and any(p in lower_text for p in ["ai đang dùng", "project nào đang dùng", "dự án nào đang dùng", "dự án nào mượn"]):
             plan.intent = IntentType.PROJECT_USAGE_QUERY
             return plan
 
+        # 6.10 User management (Admin): add user vs list users
+        if any(p in lower_text for p in ["thêm user", "tạo user", "thêm người dùng", "tạo người dùng", "thêm tài khoản", "add user"]):
+            plan.intent = IntentType.ADD_USER
+            return plan
 
-        # 6.6 User management (Admin): "danh sách user", "thêm user", "phân quyền", "role"
-        if any(p in lower_text for p in ["danh sách user", "danh sách người dùng", "thêm user", "phân quyền", "đổi role", "quản lý user"]):
-            plan.intent = IntentType.USER_MANAGEMENT
+        if any(p in lower_text for p in ["danh sách user", "danh sách người dùng", "xem danh sách user", "list users", "phân quyền", "đổi role", "quản lý user"]):
+            plan.intent = IntentType.LIST_USERS
             return plan
 
         # 6.7 Borrow / Request Create

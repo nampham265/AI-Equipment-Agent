@@ -77,9 +77,37 @@ class ExcelUserRepository:
         return openpyxl.load_workbook(self._path, data_only=True)
 
     def _safe_save(self, wb: openpyxl.Workbook) -> None:
+        import time
         tmp_path = self._path.with_suffix(".tmp")
-        wb.save(tmp_path)
-        os.replace(tmp_path, self._path)
+        try:
+            wb.save(tmp_path)
+        finally:
+            try:
+                wb.close()
+            except Exception:
+                pass
+
+        last_err = None
+        for attempt in range(5):
+            try:
+                os.replace(tmp_path, self._path)
+                return
+            except PermissionError as pe:
+                last_err = pe
+                time.sleep(0.05 * (attempt + 1))
+        if last_err:
+            raise last_err
+
+    def create_user(self, user_in) -> ExcelUserModel:
+        """Alias matching UserRepository interface."""
+        if isinstance(user_in, ExcelUserModel):
+            return self.create(user_in)
+        return self.create(ExcelUserModel(
+            user_email=getattr(user_in, "user_email", ""),
+            user_name=getattr(user_in, "user_name", ""),
+            role=getattr(user_in, "role", "USER"),
+            is_active=getattr(user_in, "is_active", True),
+        ))
 
     def _col_index(self, ws) -> dict[str, int]:
         first_row = next(ws.iter_rows(min_row=1, max_row=1, values_only=True), ())

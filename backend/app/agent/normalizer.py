@@ -174,7 +174,9 @@ def check_existence_query(text: str) -> Tuple[bool, Optional[str]]:
     if any(k in clean_low for k in [
         "bao nhiêu", "mấy cái", "mấy chiếc", "mấy đơn", "mấy", "mượn", "đăng ký", "tạo đơn",
         "request", "yêu cầu", "đơn", "quá hạn", "trả trễ", "trễ hạn", "chậm trả", "trả muộn",
-        "ai đang", "ai là", "ai", "thì sao", "thế nào", "trước đó", "trước đấy", "gần đây", "gần nhất"
+        "ai đang", "ai là", "ai", "thì sao", "thế nào", "trước đó", "trước đấy", "gần đây", "gần nhất",
+        "thay thế", "tương đương", "thay cho", "nguồn bên ngoài", "mua ngoài",
+        "xung đột", "trùng lịch", "lịch"
     ]):
         return False, None
 

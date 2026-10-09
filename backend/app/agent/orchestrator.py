@@ -5,9 +5,12 @@ import logging
 import re
 from typing import Any, Optional
 
+from app.agent.gemini_router import GeminiAgentRouter
 from app.agent.models import (
     AgentTrace,
     ConversationState,
+    ExtractedConstraints,
+    GeminiRouterOutput,
     IntentType,
     PendingForm,
     QueryPlan,
@@ -58,11 +61,135 @@ def _extract_int_req_id(d: Optional[dict]) -> Optional[int]:
     return int(m.group(1)) if m else None
 
 
-class AgentOrchestrator:
-    """Central orchestrator executing the 8-step Agent pipeline."""
+def _map_gemini_to_plan(
+    gemini_out: GeminiRouterOutput,
+    raw_message: str,
+    state: ConversationState,
+) -> QueryPlan:
+    """Map Gemini structured router output to verified backend QueryPlan."""
+    raw_intent_str = str(gemini_out.intent).strip().lower()
+    try:
+        mapped_intent = IntentType(raw_intent_str)
+    except ValueError:
+        mapped_intent = IntentType.UNKNOWN
 
-    def __init__(self, tools: AgentTools) -> None:
+    is_cancelled = bool(gemini_out.is_negation_or_cancellation or getattr(gemini_out, "action_cancelled", False))
+    if is_cancelled and mapped_intent in [IntentType.CANCEL_ACTION, IntentType.UNKNOWN]:
+        mapped_intent = IntentType.CANCEL_ACTION
+
+    plan = QueryPlan(
+        intent=mapped_intent,
+        intent_confidence=gemini_out.confidence,
+        raw_message=raw_message,
+        entity_id=gemini_out.equipment.equipment_id,
+        entity_name=gemini_out.equipment.equipment_name,
+        quantity=gemini_out.request.quantity,
+        needed_from=gemini_out.request.needed_from,
+        needed_to=gemini_out.request.needed_to,
+        project=gemini_out.request.project,
+        purpose=gemini_out.request.purpose,
+        target_request_id=gemini_out.request.request_id,
+        ordinal_index=gemini_out.reference.ordinal_index,
+        is_pronoun_reference=gemini_out.reference.is_pronoun,
+        is_group_reference=bool(gemini_out.reference.is_group or gemini_out.reference.is_group_reference),
+        negate_borrow=bool(gemini_out.request.negate_borrow or gemini_out.is_negation_or_cancellation),
+    )
+    plan.ask_auto_approve = check_ask_auto_approve(raw_message.lower())
+
+    # Enrich status filter for my_requests if not set
+    if plan.intent == IntentType.MY_REQUESTS and not plan.status_filter:
+        lower_msg = raw_message.lower()
+        if any(w in lower_msg for w in ["đã được duyệt", "đã duyệt", "được duyệt", "approved"]):
+            plan.status_filter = "Approved"
+        elif any(w in lower_msg for w in ["chờ duyệt", "còn chờ", "đang chờ", "chưa duyệt", "pending"]):
+            plan.status_filter = "Pending"
+        elif any(w in lower_msg for w in ["đang mượn", "đang giữ", "chưa trả", "borrowed"]):
+            plan.status_filter = "Borrowed"
+        elif any(w in lower_msg for w in ["bị từ chối", "từ chối", "rejected", "bác bỏ"]):
+            plan.status_filter = "Rejected"
+
+    if gemini_out.constraints:
+        c = gemini_out.constraints
+        plan.constraints = ExtractedConstraints(
+            category=c.category,
+            location=c.location,
+            geometry=c.geometry,
+            size_mm=c.size_mm,
+            pins=c.pins,
+            color=c.color,
+            keywords=c.keywords or [],
+        )
+
+    # 1. Ordinal resolution
+    if plan.ordinal_index is not None and state.last_result_set:
+        resolved_item = state_manager.get_item_by_ordinal(state, plan.ordinal_index)
+        if resolved_item:
+            if state.last_result_type in ["request", "user_requests", "overdue_loans", "active_loans"]:
+                if plan.intent in [IntentType.EQUIPMENT_DETAIL, IntentType.UNKNOWN]:
+                    plan.intent = IntentType.REQUEST_DETAIL
+                if not plan.target_request_id:
+                    plan.target_request_id = _extract_int_req_id(resolved_item)
+            elif state.last_result_type == "equipment":
+                if not plan.entity_id:
+                    plan.entity_id = str(resolved_item.get("EquipmentID") or resolved_item.get("equipment_id") or "")
+                    plan.entity_name = str(resolved_item.get("EquipmentName") or resolved_item.get("equipment_name") or "")
+
+    # 2. Pronoun resolution
+    if plan.is_pronoun_reference:
+        if plan.intent in [IntentType.REQUEST_DETAIL, IntentType.PRIORITY_REVIEW, IntentType.APPROVE_REQUEST, IntentType.REJECT_REQUEST]:
+            if not plan.target_request_id and (state.active_request or state.last_selected_item):
+                plan.target_request_id = _extract_int_req_id(state.active_request or state.last_selected_item)
+        elif plan.intent in [
+            IntentType.EQUIPMENT_DETAIL,
+            IntentType.EQUIPMENT_COUNT,
+            IntentType.AVAILABILITY_QUERY,
+            IntentType.ALTERNATIVE_SEARCH,
+            IntentType.PROJECT_USAGE_QUERY,
+            IntentType.USAGE_QUERY,
+        ]:
+            if not plan.entity_id and (state.active_equipment or state.last_selected_item):
+                item = state.active_equipment or state.last_selected_item
+                plan.entity_id = str(item.get("EquipmentID") or item.get("equipment_id") or "")
+                plan.entity_name = str(item.get("EquipmentName") or item.get("equipment_name") or "")
+
+    # 3. Group reference resolution
+    if plan.is_group_reference:
+        if state.last_result_type in ["schedule_conflicts", "conflict_pairs"] or state.last_intent in [IntentType.SCHEDULE_CONFLICTS, IntentType.CONFLICT_BORROWERS, "schedule_conflicts", "conflict_borrowers"]:
+            plan.intent = IntentType.CONFLICT_BORROWERS
+        elif state.last_result_type in ["overdue_loans", "overdue_borrowers"] or state.last_intent in [IntentType.OVERDUE_LOANS, IntentType.OVERDUE_BORROWERS, "overdue_loans", "overdue_borrowers"]:
+            plan.intent = IntentType.OVERDUE_BORROWERS
+        elif state.last_result_type in ["active_loans", "active_borrowers"] or state.last_intent in [IntentType.ACTIVE_LOANS, IntentType.ACTIVE_BORROWERS, "active_loans", "active_borrowers"]:
+            plan.intent = IntentType.ACTIVE_BORROWERS
+        elif state.last_result_type in ["request", "user_requests"] or state.last_intent in [IntentType.MY_REQUESTS, IntentType.RECENT_REQUESTS, "user_requests", "my_requests", "recent_requests"]:
+            plan.intent = IntentType.RECENT_REQUESTS
+
+    # 4. Fallback entity resolution from state context
+    if plan.intent == IntentType.REQUEST_DETAIL and not plan.target_request_id:
+        if state.active_request:
+            plan.target_request_id = _extract_int_req_id(state.active_request)
+        elif state.active_request_ids:
+            plan.target_request_id = state.active_request_ids[0]
+
+    if plan.intent in [IntentType.EQUIPMENT_DETAIL, IntentType.EQUIPMENT_COUNT, IntentType.AVAILABILITY_QUERY, IntentType.ALTERNATIVE_SEARCH, IntentType.PROJECT_USAGE_QUERY, IntentType.USAGE_QUERY] and not plan.entity_id:
+        if state.active_equipment:
+            plan.entity_id = str(state.active_equipment.get("EquipmentID") or state.active_equipment.get("equipment_id") or "")
+            plan.entity_name = str(state.active_equipment.get("EquipmentName") or state.active_equipment.get("equipment_name") or "")
+        elif state.active_equipment_ids:
+            plan.entity_id = state.active_equipment_ids[0]
+
+    return plan
+
+
+class AgentOrchestrator:
+    """Central orchestrator executing the 8-step Agent pipeline with LLM + Rule routing."""
+
+    def __init__(
+        self,
+        tools: AgentTools,
+        gemini_router: Optional[GeminiAgentRouter] = None,
+    ) -> None:
         self.tools = tools
+        self.gemini_router = gemini_router
 
     def process_message(
         self,
@@ -74,8 +201,51 @@ class AgentOrchestrator:
         # 1. State lookup
         state = state_manager.get_state(user.user_email, conversation_id)
 
-        # 2. Routing & Intent / Entity / Context resolution
-        plan = query_router.route_message(raw_message, state)
+        # 2. Routing selection
+        routing_mode = getattr(settings, "AGENT_ROUTING_MODE", "llm_primary").lower()
+        plan: Optional[QueryPlan] = None
+        llm_called = False
+        llm_intent_name: Optional[str] = None
+        fallback_used = False
+        fallback_reason: Optional[str] = None
+
+        if routing_mode in ["llm_primary", "llm"]:
+            if self.gemini_router:
+                llm_called = True
+                try:
+                    gemini_out = self.gemini_router.classify_message(raw_message, state, user.role)
+                    if gemini_out:
+                        llm_intent_name = gemini_out.intent.value if hasattr(gemini_out.intent, "value") else str(gemini_out.intent)
+                        plan = _map_gemini_to_plan(gemini_out, raw_message, state)
+                except Exception as ex:
+                    logger.warning("Gemini router error: %s. Falling back to deterministic router.", ex)
+                    fallback_reason = str(ex)
+
+            if not plan:
+                fallback_used = True
+                plan = query_router.route_message(raw_message, state)
+                if not fallback_reason:
+                    fallback_reason = "gemini_router_none_or_unconfigured"
+
+        elif routing_mode == "shadow":
+            plan = query_router.route_message(raw_message, state)
+            if self.gemini_router:
+                llm_called = True
+                try:
+                    gemini_out = self.gemini_router.classify_message(raw_message, state, user.role)
+                    if gemini_out:
+                        llm_intent_name = gemini_out.intent.value if hasattr(gemini_out.intent, "value") else str(gemini_out.intent)
+                except Exception as ex:
+                    logger.debug("Shadow router failed: %s", ex)
+        else:
+            # legacy_only
+            plan = query_router.route_message(raw_message, state)
+
+        resolved_mode = "legacy_only"
+        if routing_mode == "shadow":
+            resolved_mode = "llm_shadow"
+        elif routing_mode in ["llm_primary", "llm"]:
+            resolved_mode = "legacy_fallback" if fallback_used else "llm_primary"
 
         # 3. Create Trace object
         trace = AgentTrace(
@@ -83,6 +253,11 @@ class AgentOrchestrator:
             user_role=user.role.upper(),
             intent=plan.intent.value,
             intent_confidence=plan.intent_confidence,
+            routing_mode=resolved_mode,
+            llm_router_called=llm_called,
+            llm_intent=llm_intent_name,
+            fallback_used=fallback_used,
+            fallback_reason=fallback_reason,
             entities={
                 "entity": plan.entity_name or plan.entity_id,
                 "entity_id": plan.entity_id,
@@ -117,6 +292,12 @@ class AgentOrchestrator:
             elif plan.intent == IntentType.EQUIPMENT_SEARCH:
                 response_text, action_payload = self._handle_equipment_search(plan, state, trace)
 
+            elif plan.intent == IntentType.ALTERNATIVE_SEARCH:
+                response_text = self._handle_alternative_search(plan, state, trace)
+
+            elif plan.intent == IntentType.EXTERNAL_SOURCING:
+                response_text = self._handle_external_sourcing(plan, state, trace)
+
             elif plan.intent == IntentType.EQUIPMENT_COUNT:
                 response_text = self._handle_equipment_count(plan, state, trace)
 
@@ -135,7 +316,7 @@ class AgentOrchestrator:
             elif plan.intent == IntentType.USAGE_QUERY:
                 response_text = self._handle_usage_query(plan, state, trace)
 
-            elif plan.intent == IntentType.SCHEDULE_PLANNING_QUERY:
+            elif plan.intent in [IntentType.SCHEDULE_PLANNING, IntentType.SCHEDULE_PLANNING_QUERY]:
                 response_text = self._handle_schedule_planning(plan, state, trace)
 
             elif plan.intent == IntentType.EQUIPMENT_CONDITION_QUERY:
@@ -149,6 +330,9 @@ class AgentOrchestrator:
 
             elif plan.intent == IntentType.RETURN_REQUEST:
                 response_text, action_payload = self._handle_return_request(plan, user, state, trace)
+
+            elif plan.intent == IntentType.CANCEL_ACTION:
+                response_text, action_payload = self._handle_cancel_action(state, trace)
 
             # Manager intents
             elif plan.intent == IntentType.PENDING_REQUEST_COUNT:
@@ -184,6 +368,9 @@ class AgentOrchestrator:
             elif plan.intent == IntentType.SCHEDULE_CONFLICTS:
                 response_text = self._handle_schedule_conflicts(state, trace)
 
+            elif plan.intent == IntentType.CONFLICT_BORROWERS:
+                response_text = self._handle_conflict_borrowers(state, trace)
+
             elif plan.intent == IntentType.REQUEST_DETAIL:
                 response_text = self._handle_request_detail(plan, state, user, trace)
 
@@ -197,8 +384,15 @@ class AgentOrchestrator:
                 response_text = self._handle_reject_request(plan, state, user, trace)
 
             # Admin intents
-            elif plan.intent == IntentType.USER_MANAGEMENT:
+            elif plan.intent == IntentType.ADD_USER:
+                response_text = self._handle_add_user(plan, user, trace)
+
+            elif plan.intent in [IntentType.USER_MANAGEMENT, IntentType.LIST_USERS]:
                 response_text = self._handle_user_management(user, trace)
+
+            elif plan.intent == IntentType.CLARIFICATION_REQUIRED:
+                response_text = "Bạn có thể cung cấp thêm chi tiết về thiết bị hoặc yêu cầu được không?"
+                trace.response_mode = "clarification"
 
             elif plan.intent == IntentType.HELP:
                 response_text = self._handle_help(user)
@@ -532,28 +726,76 @@ class AgentOrchestrator:
             f"- Đơn trùng lịch chờ duyệt: {len(avail.get('competing_pending_requests', []))}"
         )
 
+    def _handle_alternative_search(
+        self,
+        plan: QueryPlan,
+        state: ConversationState,
+        trace: AgentTrace,
+    ) -> str:
+        trace.selected_tool = "search_alternative_equipment"
+        target_id = plan.entity_id or (state.active_equipment.get("EquipmentID") if state.active_equipment else None)
+        if not target_id:
+            return "Bạn muốn tìm thiết bị thay thế cho thiết bị nào? Vui lòng cung cấp mã thiết bị (ví dụ: `TU1-001`)."
+
+        result = self.tools.search_alternative_equipment(target_id)
+        if not result.get("success"):
+            return f"Không thể tìm kiếm thiết bị thay thế: {result.get('message', 'Lỗi không xác định')}"
+
+        alternatives = result.get("alternatives", [])
+        if not alternatives:
+            return f"Không tìm thấy thiết bị thay thế phù hợp trong kho cho `{target_id}` ({result.get('target_name', '')})."
+
+        trace.tool_result_count = len(alternatives)
+        lines = [
+            f"Gợi ý các thiết bị thay thế tiềm năng cho `{target_id}` (**{result.get('target_name')}**):\n",
+            f"*(Lưu ý: Mức độ tương đương mang tính tham khảo kỹ thuật, vui lòng kiểm tra datasheet trước khi sử dụng)*\n",
+        ]
+        for alt in alternatives:
+            eq = alt["equipment"]
+            suitability = alt["suitability_label"]
+            score = alt["score"]
+            lines.append(
+                f"- **{eq.equipment_name}** (`{eq.equipment_id}`) — Vị trí: {eq.location} — "
+                f"Số lượng: {eq.quantity_total} — Độ tương đồng: **{suitability}** (Điểm: {score}/100)"
+            )
+        return "\n".join(lines)
+
+    def _handle_external_sourcing(
+        self,
+        plan: QueryPlan,
+        state: ConversationState,
+        trace: AgentTrace,
+    ) -> str:
+        trace.selected_tool = "external_sourcing_search"
+        query = plan.entity_name or plan.entity_id or plan.raw_message
+        result = self.tools.external_sourcing_search(query)
+        trace.tool_result_count = len(result.get("candidates", []))
+        return result.get("message", "Tính năng tìm kiếm nguồn cung ngoài hiện chưa sẵn sàng.")
+
     def _handle_project_usage(
         self,
         plan: QueryPlan,
         state: ConversationState,
         trace: AgentTrace,
     ) -> str:
-        trace.selected_tool = "get_equipment_active_loans"
+        trace.selected_tool = "get_equipment_project_usage"
         eq_id = plan.entity_id or (state.active_equipment.get("EquipmentID") if state.active_equipment else None)
         if not eq_id:
-            return "Bạn muốn kiểm tra dự án sử dụng cho thiết bị nào?"
+            return "Bạn muốn kiểm tra dự án sử dụng cho thiết bị nào? Vui lòng cung cấp mã thiết bị."
 
-        loans = self.tools.get_equipment_active_loans(eq_id)
-        if not loans:
+        usage_info = self.tools.get_equipment_project_usage(eq_id)
+        if not usage_info.get("is_borrowed"):
             return (
-                f"Hiện hệ thống chưa có dữ liệu đáng tin cậy về project đang sử dụng `{eq_id}`.\n"
-                f"*(Lưu ý: Hệ thống quản lý kho hiện tại chỉ theo dõi qua các đơn mượn đã phê duyệt, "
+                f"Hiện tại không có đơn mượn nào đang mượn thiết bị `{eq_id}` (**{usage_info.get('equipment_name', '')}**).\n"
+                f"*(Lưu ý: Hệ thống hiện tại chỉ theo dõi qua các đơn mượn đã phê duyệt, "
                 f"chưa hỗ trợ định vị thiết bị thời gian thực theo từng dự án)*"
             )
 
-        lines = [f"Các đơn mượn đang sử dụng thiết bị `{eq_id}`:\n"]
-        for r in loans:
-            lines.append(f"- Dự án **{r.project}** (Người mượn: {r.requester_name}, Số lượng: {r.quantity}, từ {r.needed_from} đến {r.needed_to})")
+        records = usage_info.get("usage_records", [])
+        trace.tool_result_count = len(records)
+        lines = [f"Danh sách các đơn mượn/dự án đang sử dụng thiết bị `{eq_id}` (**{usage_info.get('equipment_name', '')}**):\n"]
+        for r in records:
+            lines.append(f"- Dự án **{r['project']}** (Người mượn: {r['requester']}, SL: {r['quantity']}, từ {r['needed_from']} đến {r['needed_to']})")
         return "\n".join(lines)
 
     def _handle_usage_query(
@@ -562,18 +804,17 @@ class AgentOrchestrator:
         state: ConversationState,
         trace: AgentTrace,
     ) -> str:
+        lower_msg = plan.raw_message.lower()
+        if any(w in lower_msg for w in ["dự án", "project", "ai đang dùng", "ai mượn", "ai giữ"]):
+            return self._handle_project_usage(plan, state, trace)
+
+        trace.selected_tool = "equipment_availability_schedule"
         eq_id = plan.entity_id or (state.active_equipment.get("EquipmentID") if state.active_equipment else None)
         if not eq_id:
             return "Bạn muốn hỏi thời gian nhận lại/trả của thiết bị nào?"
 
-        loans = self.tools.get_equipment_active_loans(eq_id)
-        if not loans:
-            return f"Thiết bị `{eq_id}` hiện không có đơn mượn nào đang diễn ra, hoặc hệ thống chưa có đủ dữ liệu lịch trình để xác định thời gian."
-
-        lines = [f"Lịch hoàn trả dự kiến cho thiết bị `{eq_id}`:\n"]
-        for r in loans:
-            lines.append(f"- Đơn #{r.id} (Dự án {r.project}): Dự kiến hoàn trả vào ngày **{r.needed_to}**")
-        return "\n".join(lines)
+        res = self.tools.equipment_availability_schedule(eq_id)
+        return res.get("message", "Đã tra cứu thời gian hoàn trả.")
 
     def _handle_schedule_planning(
         self,
@@ -581,6 +822,20 @@ class AgentOrchestrator:
         state: ConversationState,
         trace: AgentTrace,
     ) -> str:
+        lower_msg = plan.raw_message.lower()
+        if any(p in lower_msg for p in ["sắp xếp lịch", "điều phối", "xếp lịch", "tối ưu hóa", "sắp xếp lại"]):
+            trace.response_mode = "unsupported"
+            return (
+                "Hệ thống quản lý kho V1 hiện tại chưa hỗ trợ tính năng tự động tối ưu hóa và sắp xếp lại lịch mượn giữa các dự án. "
+                "Khi xảy ra xung đột lịch mượn thiết bị, Quản lý (Manager) sẽ xem xét mức độ ưu tiên của từng dự án để đưa ra quyết định phê duyệt."
+            )
+
+        trace.selected_tool = "equipment_availability_schedule"
+        eq_id = plan.entity_id or (state.active_equipment.get("EquipmentID") if state.active_equipment else None)
+        if eq_id:
+            res = self.tools.equipment_availability_schedule(eq_id)
+            return res.get("message", "Đã tra cứu thông tin lịch mượn.")
+
         trace.response_mode = "unsupported"
         return (
             "Hệ thống quản lý kho V1 hiện tại chưa hỗ trợ tính năng tự động tối ưu hóa và sắp xếp lại lịch mượn giữa các dự án. "
@@ -1224,9 +1479,33 @@ class AgentOrchestrator:
         trace: AgentTrace,
     ) -> str:
         trace.selected_tool = "get_schedule_conflicts"
+        state.last_result_type = "schedule_conflicts"
         conflicts = self.tools.get_schedule_conflicts()
         if not conflicts:
+            state.last_result_set = []
             return "Hiện tại không có đơn mượn nào bị xung đột lịch trùng ngày."
+
+        # Save to state for follow-up reference (e.g. "những người đó là ai")
+        state.last_result_set = [
+            {
+                "pending_id": getattr(c["pending_request"], "id", None) or c["pending_request"].get("id"),
+                "equipment_id": getattr(c["pending_request"], "equipment_id", None) or c["pending_request"].get("equipment_id"),
+                "requester_name": getattr(c["pending_request"], "requester_name", None) or c["pending_request"].get("requester_name"),
+                "requester_email": getattr(c["pending_request"], "requester_email", None) or c["pending_request"].get("requester_email"),
+                "project": getattr(c["pending_request"], "project", None) or c["pending_request"].get("project"),
+                "conflicting_requests": [
+                    {
+                        "id": getattr(o, "id", None) or o.get("id"),
+                        "requester_name": getattr(o, "requester_name", None) or o.get("requester_name"),
+                        "requester_email": getattr(o, "requester_email", None) or o.get("requester_email"),
+                        "project": getattr(o, "project", None) or o.get("project"),
+                        "status": getattr(o, "status", None) or o.get("status"),
+                    }
+                    for o in c.get("conflicting_requests", [])
+                ],
+            }
+            for c in conflicts
+        ]
 
         lines = [f"⚠️ Phát hiện {len(conflicts)} đơn mượn đang chờ duyệt bị trùng lịch với đơn khác:\n"]
         for c in conflicts:
@@ -1235,6 +1514,72 @@ class AgentOrchestrator:
             for o in c["conflicting_requests"]:
                 lines.append(f"  - Trùng với **Đơn #{o.id}** ({o.requester_name} - Trạng thái: {o.status} - SL: {o.quantity}) từ {o.needed_from} đến {o.needed_to}")
         return "\n".join(lines)
+
+    def _handle_conflict_borrowers(
+        self,
+        state: ConversationState,
+        trace: AgentTrace,
+    ) -> str:
+        trace.selected_tool = "get_conflict_borrowers"
+        conflicts = self.tools.get_schedule_conflicts()
+        if not conflicts:
+            return "Hiện tại không có xung đột lịch nào được ghi nhận."
+
+        borrowers_map: dict[str, dict[str, Any]] = {}
+        for c in conflicts:
+            p = c.get("pending_request")
+            if p:
+                email = getattr(p, "requester_email", None) or p.get("requester_email", "")
+                name = getattr(p, "requester_name", None) or p.get("requester_name", "")
+                project = getattr(p, "project", None) or p.get("project", "")
+                key = email or name
+                if key:
+                    if key not in borrowers_map:
+                        borrowers_map[key] = {
+                            "name": name,
+                            "email": email,
+                            "projects": {project} if project else set(),
+                            "role_in_conflict": "Đang yêu cầu mượn (Pending)",
+                        }
+                    elif project:
+                        borrowers_map[key]["projects"].add(project)
+
+            for o in c.get("conflicting_requests", []):
+                email = getattr(o, "requester_email", None) or o.get("requester_email", "")
+                name = getattr(o, "requester_name", None) or o.get("requester_name", "")
+                project = getattr(o, "project", None) or o.get("project", "")
+                status = getattr(o, "status", None) or o.get("status", "")
+                key = email or name
+                if key:
+                    if key not in borrowers_map:
+                        borrowers_map[key] = {
+                            "name": name,
+                            "email": email,
+                            "projects": {project} if project else set(),
+                            "role_in_conflict": f"Đang giữ/đã duyệt ({status})",
+                        }
+                    else:
+                        if project:
+                            borrowers_map[key]["projects"].add(project)
+                        borrowers_map[key]["role_in_conflict"] += f", {status}"
+
+        trace.tool_result_count = len(borrowers_map)
+        lines = [f"Danh sách các nhân sự liên quan đến các xung đột lịch (**{len(borrowers_map)}** người):\n"]
+        for b in borrowers_map.values():
+            proj_str = f" — Dự án: {', '.join(b['projects'])}" if b["projects"] else ""
+            email_str = f" (`{b['email']}`)" if b["email"] else ""
+            lines.append(f"- **{b['name']}**{email_str}{proj_str} ({b['role_in_conflict']})")
+        return "\n".join(lines)
+
+    def _handle_cancel_action(
+        self,
+        state: ConversationState,
+        trace: AgentTrace,
+    ) -> tuple[str, Optional[dict[str, Any]]]:
+        state.pending_form = None
+        state.pending_action = None
+        trace.response_mode = "cancelled"
+        return ("Đã hủy thao tác hiện tại. Bạn có thể tra cứu thiết bị hoặc thực hiện yêu cầu mới.", None)
 
     def _handle_request_detail(
         self,
@@ -1435,6 +1780,45 @@ class AgentOrchestrator:
     # -------------------------------------------------------------
     # Admin Handlers
     # -------------------------------------------------------------
+
+    def _handle_add_user(
+        self,
+        plan: QueryPlan,
+        user: SessionData,
+        trace: AgentTrace,
+    ) -> str:
+        trace.selected_tool = "add_user_account"
+        if not user.is_admin:
+            return "Chỉ quản trị viên (Admin) mới có quyền tạo tài khoản người dùng mới."
+
+        msg = plan.raw_message
+        email_match = re.search(r"[\w\.-]+@[\w\.-]+\.\w+", msg)
+        if not email_match:
+            return "Vui lòng cung cấp email hợp lệ của người dùng cần tạo (ví dụ: `nguyena@bosch.com`)."
+
+        target_email = email_match.group(0)
+        target_role = "USER"
+        if re.search(r"\b(manager|quản lý)\b", msg, re.IGNORECASE):
+            target_role = "MANAGER"
+
+        name_match = re.search(r"(?:tên|name)\s+([A-Za-zÀ-ỹ\s]+?)(?=\s+(?:role|vai trò|email|$))", msg, re.IGNORECASE)
+        target_name = name_match.group(1).strip() if name_match else target_email.split("@")[0].title()
+
+        try:
+            res = self.tools.add_user_account(
+                user_email=target_email,
+                user_name=target_name,
+                role=target_role,
+                actor_role=user.role,
+            )
+            return (
+                f"✅ Đã tạo tài khoản thành công cho **{res['user_name']}**:\n"
+                f"- Email: `{res['user_email']}`\n"
+                f"- Vai trò: **{res['role']}**\n"
+                f"- Trạng thái: Hoạt động"
+            )
+        except Exception as ex:
+            return f"❌ Không thể tạo tài khoản: {str(ex)}"
 
     def _handle_user_management(self, user: SessionData, trace: AgentTrace) -> str:
         trace.selected_tool = "list_users"

@@ -10,6 +10,7 @@ from app.core.config import settings
 from app.repositories.base import EquipmentRepository, RequestRepository, UserRepository
 from app.schemas.equipment import EquipmentRead
 from app.schemas.requests import RequestCreate, RequestRead
+from app.agent.services.external_sourcing import ExternalSourcingService
 from app.services.approval_service import ApprovalService
 from app.services.availability_service import AvailabilityService
 from app.services.priority_service import PriorityService
@@ -26,6 +27,7 @@ class AgentTools:
         priority_service: Optional[PriorityService] = None,
         availability_service: Optional[AvailabilityService] = None,
         approval_service: Optional[ApprovalService] = None,
+        external_sourcing_service: Optional[ExternalSourcingService] = None,
     ) -> None:
         self.equipment_repo = equipment_repo
         self.request_repo = request_repo
@@ -33,7 +35,12 @@ class AgentTools:
         self.retrieval = HybridRetrievalService(equipment_repo)
         self.priority_service = priority_service
         self.availability_service = availability_service or AvailabilityService(request_repo)
-        self.approval_service = approval_service or ApprovalService(request_repo)
+        if not approval_service:
+            from app.notifications.console_provider import ConsoleNotificationProvider
+            from app.services.notification_service import NotificationService
+            approval_service = ApprovalService(request_repo, NotificationService(ConsoleNotificationProvider()))
+        self.approval_service = approval_service
+        self.external_sourcing_svc = external_sourcing_service or ExternalSourcingService()
 
     # -------------------------------------------------------------
     # User Tools
@@ -395,3 +402,191 @@ class AgentTools:
         if not self.user_repo:
             raise RuntimeError("User repository not configured.")
         return self.user_repo.update_role(email, new_role, admin_email)
+
+    # -------------------------------------------------------------
+    # Missing Capabilities Tools (Phase 2)
+    # -------------------------------------------------------------
+
+    def search_alternative_equipment(
+        self,
+        target_equipment_id: Optional[str] = None,
+        target_equipment_name: Optional[str] = None,
+        constraints: Optional[ExtractedConstraints] = None,
+        max_results: int = 5,
+        limit: Optional[int] = None,
+    ) -> dict[str, Any]:
+        """Find alternative/substitute equipment. Target equipment is NEVER included in results."""
+        effective_limit = limit if limit is not None else max_results
+        target_id_clean = (target_equipment_id or "").strip().upper()
+        target_obj = self.equipment_repo.get_by_id(target_id_clean) if target_id_clean else None
+
+        category = target_obj.category if target_obj and target_obj.category else (constraints.category if constraints else None)
+        all_equipment = self.equipment_repo.get_all()
+        candidates = []
+
+        for eq in all_equipment:
+            # CRITICAL RULE: Target equipment MUST NEVER appear in its own alternative results
+            if target_id_clean and eq.equipment_id.upper() == target_id_clean:
+                continue
+            if target_equipment_name and eq.equipment_name.strip().lower() == target_equipment_name.strip().lower():
+                continue
+
+            score = 0
+            match_points = []
+            if category and (eq.category or "").lower() == category.lower():
+                score += 4
+                match_points.append(f"Cùng nhóm: {eq.category}")
+            if constraints:
+                if constraints.location and constraints.location.lower() in (eq.location or "").lower():
+                    score += 2
+                    match_points.append(f"Cùng vị trí: {eq.location}")
+                if constraints.size_mm and f"{constraints.size_mm}mm" in (eq.description or ""):
+                    score += 3
+                    match_points.append(f"Kích thước khớp: {constraints.size_mm}mm")
+                if constraints.geometry and constraints.geometry.lower() in (eq.description or "").lower():
+                    score += 3
+                    match_points.append(f"Kiểu dáng khớp: {constraints.geometry}")
+                if constraints.pins and f"{constraints.pins}pos" in (eq.description or "").lower():
+                    score += 3
+                    match_points.append(f"Số chân khớp: {constraints.pins} pin")
+
+            if target_obj and target_obj.description and eq.description:
+                target_words = set(target_obj.description.lower().split())
+                eq_words = set(eq.description.lower().split())
+                common = (target_words & eq_words) - {"và", "với", "cho", "loại", "cái", "mm", "khoảng", "tủ"}
+                if len(common) >= 2:
+                    score += min(len(common), 4)
+                    match_points.append(f"Đặc tính kỹ thuật tương đồng ({len(common)} thông số)")
+
+            if score > 0 or (not target_obj and not category):
+                candidates.append({
+                    "equipment": eq,
+                    "score": score,
+                    "match_reasons": match_points,
+                    "equivalence_status": "POTENTIALLY_SUITABLE",
+                })
+
+        candidates.sort(key=lambda x: x["score"], reverse=True)
+        top_candidates = candidates[:effective_limit]
+        return {
+            "success": True,
+            "target_equipment_id": target_id_clean,
+            "target_equipment_name": target_obj.equipment_name if target_obj else target_equipment_name,
+            "target_name": target_obj.equipment_name if target_obj else (target_equipment_name or target_id_clean),
+            "has_official_equivalence": False,
+            "official_equivalence_notice": "Kho hiện chưa có danh mục quy chuẩn tương đương chính thức. Các gợi ý dưới đây dựa trên đối soát thuộc tính kỹ thuật tương đồng.",
+            "alternatives": [
+                {
+                    "equipment": c["equipment"],
+                    "suitability_label": c["equivalence_status"],
+                    "score": c["score"] * 10,
+                    "match_reasons": c["match_reasons"],
+                }
+                for c in top_candidates
+            ],
+            "candidates": top_candidates,
+        }
+
+    def external_sourcing_search(
+        self,
+        product_query: str,
+        constraints: Optional[dict[str, Any]] = None,
+        max_results: int = 3,
+    ) -> dict[str, Any]:
+        """Search external suppliers/sources outside warehouse inventory."""
+        if not self.external_sourcing_svc:
+            self.external_sourcing_svc = ExternalSourcingService()
+        res = self.external_sourcing_svc.search_sources(product_query, constraints, max_results)
+        return res.model_dump()
+
+    def get_equipment_project_usage(self, equipment_id: str) -> dict[str, Any]:
+        """Query active project usage for an equipment. ONLY 'Borrowed' requests count as active usage."""
+        eq = self.equipment_repo.get_by_id(equipment_id.strip().upper())
+        all_borrowed = self.request_repo.list_all(status="Borrowed")
+        matching_loans = [
+            r for r in all_borrowed
+            if r.equipment_id.strip().upper() == equipment_id.strip().upper()
+        ]
+
+        return {
+            "equipment_id": equipment_id.strip().upper(),
+            "equipment_name": eq.equipment_name if eq else equipment_id,
+            "is_borrowed": len(matching_loans) > 0,
+            "active_loans_count": len(matching_loans),
+            "usage_records": [
+                {
+                    "request_id": getattr(r, "display_id", f"REQ-{r.id:06d}"),
+                    "project": r.project,
+                    "requester": r.requester_name,
+                    "quantity": r.quantity,
+                    "needed_from": r.needed_from,
+                    "needed_to": r.needed_to,
+                    "status": r.status,
+                }
+                for r in matching_loans
+            ],
+        }
+
+    def equipment_availability_schedule(self, equipment_id: str, quantity_needed: int = 1) -> dict[str, Any]:
+        """Estimate release dates based on NeededTo of currently Borrowed requests."""
+        usage_info = self.get_equipment_project_usage(equipment_id)
+        if not usage_info["is_borrowed"]:
+            return {
+                "equipment_id": equipment_id,
+                "status": "AVAILABLE_NOW",
+                "message": "Thiết bị hiện không có đơn mượn nào đang giữ (trạng thái Borrowed). Các dự án khác có thể đăng ký mượn ngay.",
+                "earliest_release_date": None,
+                "borrowed_records": [],
+            }
+
+        records = sorted(usage_info["usage_records"], key=lambda r: r.get("needed_to") or "9999-12-31")
+        earliest_return = records[0].get("needed_to")
+        proj_name = records[0].get("project") or "hiện tại"
+
+        return {
+            "equipment_id": equipment_id,
+            "status": "CURRENTLY_BORROWED",
+            "message": f"Dựa trên các phiếu mượn thực tế đang giữ đồ, dự án {proj_name} dự kiến trả vào ngày {earliest_return}.",
+            "earliest_release_date": earliest_return,
+            "borrowed_records": records,
+        }
+
+    def add_user_account(
+        self,
+        user_email: str,
+        user_name: str,
+        role: str,
+        actor_role: str,
+    ) -> dict[str, Any]:
+        """Add a new user/manager. Strictly protected by RBAC (ADMIN only, cannot create ADMIN)."""
+        if (actor_role or "").upper() != "ADMIN":
+            raise PermissionError("Chỉ người dùng có quyền ADMIN mới được phép tạo tài khoản người dùng mới.")
+
+        target_role = role.strip().upper()
+        if target_role not in ["USER", "MANAGER"]:
+            raise ValueError(f"Vai trò không hợp lệ: '{role}'. Chỉ cho phép tạo vai trò USER hoặc MANAGER qua luồng này.")
+
+        email_clean = user_email.strip().lower()
+        if not email_clean or "@" not in email_clean:
+            raise ValueError(f"Email không hợp lệ: '{user_email}'")
+
+        if not self.user_repo:
+            raise RuntimeError("Hệ thống quản trị tài khoản người dùng chưa được cấu hình.")
+
+        existing = self.user_repo.get_by_email(email_clean)
+        if existing:
+            raise ValueError(f"Người dùng với email '{email_clean}' đã tồn tại trong hệ thống.")
+
+        from app.schemas.users import UserCreate
+        created = self.user_repo.create_user(UserCreate(
+            user_email=email_clean,
+            user_name=user_name.strip() or email_clean.split("@")[0].title(),
+            role=target_role,
+        ))
+        return {
+            "success": True,
+            "user_email": created.user_email,
+            "user_name": created.user_name,
+            "role": created.role,
+            "is_active": created.is_active,
+        }

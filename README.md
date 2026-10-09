@@ -53,14 +53,24 @@ Dữ liệu thiết bị thật (116 mục), ứng dụng chỉ đọc (`read-on
 - `NeededFrom`: Ngày bắt đầu cần dùng (YYYY-MM-DD)
 - `NeededTo`: Ngày dự kiến hoàn trả (YYYY-MM-DD, >= NeededFrom)
 - `Purpose`: Mục đích sử dụng
-- `PriorityLevel`: Mức ưu tiên do AI đề xuất (`High`, `Medium`, `Low`, `Needs review`)
+- `PriorityLevel`: Mức ưu tiên do AI đề xuất (`Critical`, `High`, `Medium`, `Low`, `Needs review`)
 - `PriorityReason`: Lý do giải thích của AI (không bị sửa đổi sau khi tạo)
 - `FinalPriorityLevel`: Mức ưu tiên chính thức do Quản lý xác nhận
 - `PriorityReviewedBy`: Email của Quản lý đã xác nhận mức ưu tiên
 - `PriorityReviewedAt`: Thời điểm Quản lý xác nhận (ISO timestamp)
 - `Status`: Trạng thái (`Pending`, `Approved`, `Rejected`, `Borrowed`, `Returned`, `Cancelled`)
+- `ReturnCondition`: Tình trạng khi hoàn trả (`Good`, `Normal`, `Damaged`, ...)
+- `ReturnConditionNote`: Ghi chú tình trạng thiết bị khi trả
+- `ReturnedAt`: Thời điểm trả thiết bị (ISO timestamp)
 - `CreatedAt`: Thời điểm tạo yêu cầu (ISO timestamp)
 - `UpdatedAt`: Thời điểm cập nhật cuối cùng (ISO timestamp)
+
+### Sheet 3: `Users` (Danh sách tài khoản & Phân quyền)
+Lưu trữ thông tin người dùng và phân quyền RBAC:
+- `UserEmail`: Email đăng nhập
+- `UserName`: Họ tên người dùng
+- `Role`: Vai trò (`USER`, `MANAGER`, `ADMIN`)
+- `IsActive`: Trạng thái kích hoạt tài khoản (`TRUE` / `FALSE`)
 
 ---
 
@@ -170,15 +180,24 @@ Truy cập: **http://localhost:5173**
 
 ## 7. Chạy bộ kiểm thử tự động (Automated Tests)
 
-Chạy toàn bộ 73 bài kiểm thử tự động của backend:
+Chạy toàn bộ 160 bài kiểm thử tự động của backend:
 
 ```powershell
 cd backend
 python3.11 -m pytest tests/ -v
 ```
 
-Kết quả: **73/73 tests PASSED (100%)**, bao gồm:
+Kết quả: **160/160 tests PASSED (100%)**, bao gồm:
+- `test_agent_architecture_upgrade.py`: Kiểm tra 5 capability tools mới, RBAC admin, group reference và failover LLM.
+- `test_my_requests_layout.py`: Kiểm tra CSS contract, filter trạng thái (`Approved`, `Pending`, `Borrowed`) và follow-up người quá hạn.
+- `test_agent_remediation.py`: Kiểm tra hồi quy phân loại, tìm kiếm đa thuộc tính, bảo vệ không tự duyệt.
+- `test_agent_orchestrator.py`: Kiểm tra merging form state, tham chiếu thứ tự, tính thiếu hụt số lượng.
+- `test_agent_conversation.py`: Kiểm tra làm rõ thông tin, phân trang xem tiếp, truy vấn vị trí.
+- `test_conflict_engine.py`: Kiểm tra engine phát hiện xung đột lịch, deduplication cặp duy nhất và chuẩn hóa KPI.
+- `test_return_flow.py`: Kiểm tra luồng trả thiết bị, đánh giá tình trạng hao mòn và phân quyền.
+- `test_role_authorization.py`: Kiểm tra phân quyền đa vai trò (USER, MANAGER, ADMIN), bảo vệ không cho tự duyệt đơn của chính mình.
 - `test_excel_repository.py`: Kiểm tra tính toàn vẹn, khả năng đọc/ghi an toàn của file Excel.
+- `test_excel_user_repository.py`: Kiểm tra quản lý tài khoản người dùng trên worksheet Users.
 - `test_excel_api.py`: Kiểm tra luồng gọi API end-to-end với dữ liệu Excel.
 - `test_availability.py`: Kiểm tra thuật toán tính toán độ khả dụng theo khung thời gian.
 - `test_priority_validation.py`: Kiểm tra schema và tính an toàn của đánh giá AI.

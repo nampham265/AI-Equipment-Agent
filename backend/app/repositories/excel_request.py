@@ -230,11 +230,27 @@ class ExcelRequestRepository(RequestRepository):
                 ws.cell(row_num, idx).value = value
 
     def _safe_save(self, wb: openpyxl.Workbook) -> None:
-        """Save workbook atomically: write to temp file then rename."""
+        """Save workbook atomically: write to temp file then rename with Windows lock retry."""
+        import time
         tmp_path = self._path.with_suffix(".tmp")
-        wb.save(tmp_path)
-        # On Windows, os.replace handles the atomic rename
-        os.replace(tmp_path, self._path)
+        try:
+            wb.save(tmp_path)
+        finally:
+            try:
+                wb.close()
+            except Exception:
+                pass
+
+        last_err = None
+        for attempt in range(5):
+            try:
+                os.replace(tmp_path, self._path)
+                return
+            except PermissionError as pe:
+                last_err = pe
+                time.sleep(0.05 * (attempt + 1))
+        if last_err:
+            raise last_err
 
     def _load_all_rows(self) -> list[ExcelRequestModel]:
         wb = self._load_workbook()

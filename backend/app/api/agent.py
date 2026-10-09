@@ -83,7 +83,18 @@ def agent_message(
         availability_service=availability_svc,
         approval_service=approval_svc,
     )
-    orchestrator = AgentOrchestrator(tools)
+    gemini_router = None
+    if settings.gemini_configured:
+        try:
+            from app.agent.gemini_router import GeminiAgentRouter
+            gemini_router = GeminiAgentRouter(
+                api_key=settings.GEMINI_API_KEY,
+                model=settings.GEMINI_MODEL,
+            )
+        except Exception as e:
+            logger.warning("Could not initialize GeminiAgentRouter: %s", e)
+
+    orchestrator = AgentOrchestrator(tools, gemini_router=gemini_router)
 
     conv_id = body.conversation_id or "default"
 
