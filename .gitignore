@@ -31,3 +31,18 @@ Thumbs.db
 .idea/
 ~$*
 
+# AI Agent IDE configs and internal prompts
+.agents/
+AGENTS.md
+PROMPT_TO_START.md
+
+# Project documentation
+docs/
+
+# Local backup and database files
+backend/data/*.bak
+backend/data/*.pre_conflict_cleanup
+backend/data/*.db
+backend/data/*.sqlite
+backend/data/*.sqlite3
+
