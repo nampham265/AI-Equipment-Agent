@@ -83,12 +83,16 @@ export function MarkdownRenderer({ content }: MarkdownRendererProps) {
 
   const flushTable = (keyPrefix: number) => {
     if (currentTableLines.length > 0) {
-      const rawRows = currentTableLines.map((row) =>
-        row
-          .slice(1, -1)
-          .split('|')
-          .map((cell) => cell.trim())
-      )
+      const rawRows = currentTableLines.map((row) => {
+        const trimmed = row.trim()
+        const inner =
+          trimmed.startsWith('|') && trimmed.endsWith('|')
+            ? trimmed.slice(1, -1)
+            : trimmed.replace(/^\|/, '').replace(/\|$/, '')
+        return inner
+          .split(/(?<!\\)\|/)
+          .map((cell) => cell.replace(/\\\|/g, '|').trim())
+      })
 
       if (rawRows.length > 0) {
         const headerRow = rawRows[0]

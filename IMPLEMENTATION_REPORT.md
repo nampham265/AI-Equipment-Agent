@@ -242,6 +242,41 @@ Turn execution with `"Những thiết bị nào còn dưới 5 cái?"`:
 ```
 
 ### 10.4 Test Suite Summary
-- `backend/tests/test_low_stock_report.py`: **17 / 17 passed**.
+- `backend/tests/test_low_stock_report.py`: **21 / 21 passed**.
 - `backend/tests/test_hotfix_regression.py`: **25 / 25 passed**.
-- Total backend automated test suite: **202 / 202 passed**.
+- Total backend automated test suite: **206 / 206 passed**.
+
+---
+
+## 11. Markdown Table Cell Escaping Fix
+
+### 11.1 Problem & Root Cause
+- **Observed Behavior:** Equipment with pipe characters in their names (e.g. `TE Connectivity AMP MCP 2.8 Series Female Crimp Terminal, 13 AWG Min Crimp, 15 AWG Max | RS` — `TU1-014`) broke Markdown table rendering.
+- **Root Cause:**
+  - The unescaped pipe `|` inside the name was interpreted by Markdown parsers as an additional column delimiter.
+  - This shifted the columns: Quantity became `RS`, Unit became `1`, Location became `cái`, Equipment ID became `Tủ 1`, and the actual ID `TU1-014` overflowed outside the table.
+  - The frontend `MarkdownRenderer.tsx` split rows using `.split('|')` without recognizing escaped pipes.
+
+### 11.2 Solution
+1. **Backend Cell-Level Escaper (`escape_markdown_cell`):**
+   - Implemented in `backend/app/agent/orchestrator.py`.
+   - Applied at the individual cell level before constructing table row boundaries:
+     - Escapes literal pipe `|` $\rightarrow$ `\|` (avoiding double escaping).
+     - Normalizes embedded newlines (`\r`, `\n`, `\t`) into single spaces, keeping table rows on a single line.
+     - Handles backtick spans safely (`wrap_code=True`).
+     - Formats empty/missing optional values safely (`location` $\rightarrow$ `"Chưa xác định"`, `unit` $\rightarrow$ `"cái"`).
+2. **Frontend Markdown Table Parser Upgrade:**
+   - In `frontend/src/components/MarkdownRenderer.tsx`, updated `flushTable`:
+     - Splits table rows on unescaped pipes using regex lookbehind: `/(?<!\\)\|/`.
+     - Unescapes `\|` back to `|` within each cell (`cell.replace(/\\\|/g, '|').trim()`).
+   - Ensures exact column count (5) matches between `thead` and `tbody` across all rows.
+3. **Data Integrity:**
+   - Original Excel data in `equipment_agent.xlsx` and `state.last_result_set` remain 100% intact with literal `|` for accurate search and borrow/return workflows.
+
+### 11.3 Test Coverage
+- Automated regression test suite `TestMarkdownTableEscaping` in `backend/tests/test_low_stock_report.py`:
+  - `test_escape_markdown_cell_pipe`: tests `|` escaping and guard against double escaping.
+  - `test_escape_markdown_cell_newlines_and_empty`: tests newline normalization and null safety.
+  - `test_table_row_column_alignment_with_special_characters`: verifies 5 items with pipes, normal text, long strings (>150 chars), missing optional fields, and multiple pipes with embedded newlines all maintain exactly 5 columns.
+  - `test_live_catalog_every_table_row_has_exact_column_count`: verifies all 52 live low-stock records maintain exact 5-column alignment, with `TU1-014` values correctly aligned.
+

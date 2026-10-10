@@ -62,6 +62,41 @@ def _extract_int_req_id(d: Optional[dict]) -> Optional[int]:
     return int(m.group(1)) if m else None
 
 
+def escape_markdown_cell(
+    value: Any,
+    wrap_code: bool = False,
+    wrap_bold: bool = False,
+) -> str:
+    """Safely format and escape an individual Markdown table cell value.
+
+    - Handles None, empty, or non-string values safely.
+    - Replaces embedded newlines (\\r, \\n, \\t) with a single space so table rows stay on 1 line.
+    - Escapes literal pipe characters (| -> \\|) at the cell level.
+    - Handles backticks safely when wrapping code spans.
+    - Wraps in bold or code if requested, without breaking cell boundaries.
+    """
+    if value is None:
+        raw_str = ""
+    else:
+        raw_str = str(value).strip()
+
+    # Normalize embedded newlines and whitespace
+    clean_str = re.sub(r"[\r\n\t]+", " ", raw_str).strip()
+
+    # Escape pipe characters: replace | with \| (guard against double escaping existing \|)
+    escaped_pipe = re.sub(r"(?<!\\)\|", r"\|", clean_str)
+
+    if wrap_code:
+        # Avoid nested or mismatched backticks breaking the code span
+        safe_code = escaped_pipe.replace("`", "'")
+        return f"`{safe_code}`" if safe_code else ""
+
+    if wrap_bold:
+        return f"**{escaped_pipe}**" if escaped_pipe else ""
+
+    return escaped_pipe
+
+
 def _map_gemini_to_plan(
     gemini_out: GeminiRouterOutput,
     raw_message: str,
@@ -686,9 +721,12 @@ class AgentOrchestrator:
         ]
 
         for it in items:
-            lines.append(
-                f"| **{it['equipment_name']}** | {it['recorded_quantity']} | {it['unit']} | {it['location']} | `{it['equipment_id']}` |"
-            )
+            name_cell = escape_markdown_cell(it.get("equipment_name") or "Chưa đặt tên", wrap_bold=True)
+            qty_cell = escape_markdown_cell(it.get("recorded_quantity") if it.get("recorded_quantity") is not None else 0)
+            unit_cell = escape_markdown_cell(it.get("unit") or "cái")
+            loc_cell = escape_markdown_cell(it.get("location") or "Chưa xác định")
+            id_cell = escape_markdown_cell(it.get("equipment_id") or "N/A", wrap_code=True)
+            lines.append(f"| {name_cell} | {qty_cell} | {unit_cell} | {loc_cell} | {id_cell} |")
 
         lines.append(
             f"\n*(Lưu ý: Danh sách trên thể hiện số lượng ghi nhận trong cơ sở dữ liệu kho nhằm hỗ trợ nhận diện các thiết bị có thể cần bổ sung. Hệ thống không tự động đưa ra quyết định mua hàng hay tạo đơn mua sắm).* "

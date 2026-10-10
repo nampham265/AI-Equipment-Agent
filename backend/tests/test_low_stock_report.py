@@ -385,3 +385,167 @@ class TestApiIntegrationLowStock:
         assert trace.get("selected_tool") == "get_low_stock_inventory"
         assert trace.get("tool_arguments", {}).get("operator") == "<"
         assert trace.get("tool_arguments", {}).get("threshold") == 10
+
+
+class TestMarkdownTableEscaping:
+    """Test suite for Markdown table cell escaping in inventory reports."""
+
+    def test_escape_markdown_cell_pipe(self):
+        from app.agent.orchestrator import escape_markdown_cell
+        # Raw pipe escaped to \|
+        raw = "TE Connectivity AMP MCP 2.8 Series Female Crimp Terminal, 13 AWG Min Crimp, 15 AWG Max | RS"
+        escaped = escape_markdown_cell(raw)
+        assert escaped == "TE Connectivity AMP MCP 2.8 Series Female Crimp Terminal, 13 AWG Min Crimp, 15 AWG Max \\| RS"
+
+        # Already escaped pipe does not get double-escaped
+        assert escape_markdown_cell("Item \\| Part") == "Item \\| Part"
+
+    def test_escape_markdown_cell_newlines_and_empty(self):
+        from app.agent.orchestrator import escape_markdown_cell
+        assert escape_markdown_cell(None) == ""
+        assert escape_markdown_cell("   ") == ""
+        # Newlines converted to spaces
+        assert escape_markdown_cell("Line 1\nLine 2\r\nLine 3") == "Line 1 Line 2 Line 3"
+
+    def test_table_row_column_alignment_with_special_characters(self, mock_request_repo, auth_user):
+        import re
+        from app.agent.state import state_manager
+        repo = MagicMock()
+        items = [
+            # 1. Pipe in name
+            DummyEquipment(
+                equipment_id="PIPE-01",
+                equipment_name="TE Connectivity AMP MCP 2.8 Series Female Crimp Terminal, 13 AWG Min Crimp, 15 AWG Max | RS",
+                quantity_total=1,
+                unit="cái",
+                location="Tủ 1",
+            ),
+            # 2. Normal name without special characters
+            DummyEquipment(
+                equipment_id="NORM-01",
+                equipment_name="Saleae Logic Analyzer",
+                quantity_total=1,
+                unit="bộ",
+                location="tủ CSW",
+            ),
+            # 3. Very long name
+            DummyEquipment(
+                equipment_id="LONG-01",
+                equipment_name="A" * 150,
+                quantity_total=2,
+                unit="cái",
+                location="EBS_LAB",
+            ),
+            # 4. Empty optional values
+            DummyEquipment(
+                equipment_id="EMPTY-01",
+                equipment_name="Thiết bị thiếu thông tin",
+                quantity_total=3,
+                unit=None,
+                location=None,
+            ),
+            # 5. Multiple pipes and embedded newlines
+            DummyEquipment(
+                equipment_id="MULTI-01",
+                equipment_name="Sensor X | Version 2.0 | High-Temp\nIndustrial Grade | RS",
+                quantity_total=4,
+                unit="con",
+                location="Tủ 2 | Ngăn B",
+            ),
+        ]
+        repo.get_all.return_value = items
+        tools = AgentTools(repo, mock_request_repo)
+        orchestrator = AgentOrchestrator(tools=tools, gemini_router=None)
+
+        result = orchestrator.process_message(
+            raw_message="Hiện tại trong kho có thiết bị nào sắp hết không",
+            user=auth_user,
+            conversation_id="conv-escaping-test",
+        )
+
+        reply = result["reply"]
+        table_lines = [l.strip() for l in reply.split("\n") if l.strip().startswith("|")]
+
+        assert len(table_lines) >= 7  # header, divider, and 5 data rows
+        header_row = table_lines[0]
+        divider_row = table_lines[1]
+        data_rows = table_lines[2:]
+
+        # Header has 5 columns
+        header_cols = [c.strip() for c in re.split(r"(?<!\\)\|", header_row)[1:-1]]
+        assert len(header_cols) == 5
+        assert header_cols == ["Tên thiết bị", "Số lượng ghi nhận", "Đơn vị", "Vị trí", "Mã thiết bị"]
+
+        for idx, row in enumerate(data_rows):
+            # Split using unescaped pipe
+            cols = [c.strip() for c in re.split(r"(?<!\\)\|", row)[1:-1]]
+            assert len(cols) == 5, f"Row {idx} malformed: expected 5 columns, got {len(cols)}. Row: {row}"
+
+        # Verify PIPE-01 columns alignment
+        pipe_row = next(r for r in data_rows if "PIPE-01" in r)
+        pipe_cols = [c.strip() for c in re.split(r"(?<!\\)\|", pipe_row)[1:-1]]
+        assert "15 AWG Max \\| RS" in pipe_cols[0]
+        assert pipe_cols[1] == "1"
+        assert pipe_cols[2] == "cái"
+        assert pipe_cols[3] == "Tủ 1"
+        assert "`PIPE-01`" in pipe_cols[4]
+
+        # Verify EMPTY-01 handles missing optional values
+        empty_row = next(r for r in data_rows if "EMPTY-01" in r)
+        empty_cols = [c.strip() for c in re.split(r"(?<!\\)\|", empty_row)[1:-1]]
+        assert len(empty_cols) == 5
+        assert empty_cols[2] == "cái"  # default unit
+        assert empty_cols[3] == "Chưa xác định"  # default location
+
+        # Verify MULTI-01 handles multiple pipes and newlines safely
+        multi_row = next(r for r in data_rows if "MULTI-01" in r)
+        multi_cols = [c.strip() for c in re.split(r"(?<!\\)\|", multi_row)[1:-1]]
+        assert len(multi_cols) == 5
+        assert "\n" not in multi_cols[0]
+        assert "\\|" in multi_cols[0]
+        assert "\\|" in multi_cols[3]  # location also had pipe
+
+        # Verify original name in state.last_result_set is preserved without escaped backslash
+        state = state_manager.get_state(auth_user.user_email, "conv-escaping-test")
+        pipe_state_item = next(it for it in state.last_result_set if it["EquipmentID"] == "PIPE-01")
+        assert pipe_state_item["EquipmentName"] == "TE Connectivity AMP MCP 2.8 Series Female Crimp Terminal, 13 AWG Min Crimp, 15 AWG Max | RS"
+
+    def test_live_catalog_every_table_row_has_exact_column_count(self, auth_user):
+        import re
+        app.dependency_overrides[get_current_user] = lambda: auth_user
+        client = TestClient(app)
+
+        res = client.post(
+            "/api/agent/message",
+            json={
+                "message": "Hiện tại trong kho có thiết bị nào sắp hết không",
+                "conversation_id": "test-e2e-live-table-escaping",
+            },
+        )
+        assert res.status_code == 200
+        data = res.json()
+        reply = data.get("reply", "")
+
+        table_lines = [l.strip() for l in reply.split("\n") if l.strip().startswith("|")]
+        assert len(table_lines) > 2
+
+        header_cols = [c.strip() for c in re.split(r"(?<!\\)\|", table_lines[0])[1:-1]]
+        assert len(header_cols) == 5
+
+        data_rows = table_lines[2:]
+        found_tu1_014 = False
+
+        for r_idx, row in enumerate(data_rows):
+            cols = [c.strip() for c in re.split(r"(?<!\\)\|", row)[1:-1]]
+            assert len(cols) == 5, f"Row {r_idx} failed column count: {row}"
+            if "TU1-014" in cols[4]:
+                found_tu1_014 = True
+                # Check column contents:
+                assert "15 AWG Max \\| RS" in cols[0]
+                assert cols[1] == "1"
+                assert cols[2] in ["cuộn", "cái"]
+                assert cols[3] == "Tủ 1"
+                assert cols[4] == "`TU1-014`"
+
+        assert found_tu1_014, "TU1-014 must be present in low stock report"
+
