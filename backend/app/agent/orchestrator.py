@@ -94,8 +94,48 @@ def _map_gemini_to_plan(
         is_pronoun_reference=gemini_out.reference.is_pronoun,
         is_group_reference=bool(gemini_out.reference.is_group or gemini_out.reference.is_group_reference),
         negate_borrow=bool(gemini_out.request.negate_borrow or gemini_out.is_negation_or_cancellation),
+        low_stock_threshold=getattr(gemini_out, "low_stock_threshold", None),
+        low_stock_operator=getattr(gemini_out, "low_stock_operator", None),
     )
     plan.ask_auto_approve = check_ask_auto_approve(raw_message.lower())
+
+    # Check low-stock inventory intent guard
+    lower_msg = raw_message.lower()
+    is_low_stock_msg = (
+        any(p in lower_msg for p in [
+            "sắp hết", "còn ít", "tồn thấp", "số lượng tồn thấp", "cần bổ sung", "sắp cạn", "tồn kho thấp",
+        ])
+        or (
+            any(w in lower_msg for w in ["kho", "trong kho", "thiết bị", "món"])
+            and any(w in lower_msg for w in ["sắp hết", "còn ít", "cần bổ sung", "sắp cạn"])
+        )
+        or bool(re.search(r"(?:dưới|còn dưới)\s+(\d+)\s*(?:cái|chiếc|món|bộ)?", lower_msg))
+        or bool(re.search(r"(\d+)\s*(?:cái|chiếc|món|bộ)?\s*trở\s*xuống", lower_msg))
+        or bool(re.search(r"không\s*quá\s*(\d+)", lower_msg))
+    )
+    if is_low_stock_msg and not plan.entity_id and not any(w in lower_msg for w in ["mượn", "borrow", "trả", "return"]):
+        plan.intent = IntentType.LOW_STOCK_INVENTORY
+        plan.entity_id = None
+        plan.entity_name = None
+
+    if plan.intent == IntentType.LOW_STOCK_INVENTORY:
+        m_strict = re.search(r"(?:còn\s+)?dưới\s+(\d+)", lower_msg)
+        m_inc = re.search(r"(\d+)\s*(?:cái|chiếc|món|bộ)?\s*trở\s*xuống", lower_msg)
+        m_no_more = re.search(r"không\s*quá\s*(\d+)", lower_msg)
+
+        if m_strict:
+            plan.low_stock_threshold = int(m_strict.group(1))
+            plan.low_stock_operator = "<"
+        elif m_inc:
+            plan.low_stock_threshold = int(m_inc.group(1))
+            plan.low_stock_operator = "<="
+        elif m_no_more:
+            plan.low_stock_threshold = int(m_no_more.group(1))
+            plan.low_stock_operator = "<="
+
+        # Clean bogus keywords/entities
+        plan.entity_id = None
+        plan.entity_name = None
 
     # Enrich status filter for my_requests if not set
     if plan.intent == IntentType.MY_REQUESTS and not plan.status_filter:
@@ -306,6 +346,9 @@ class AgentOrchestrator:
 
             elif plan.intent == IntentType.EQUIPMENT_SEARCH:
                 response_text, action_payload = self._handle_equipment_search(plan, state, trace)
+
+            elif plan.intent == IntentType.LOW_STOCK_INVENTORY:
+                response_text = self._handle_low_stock_inventory(plan, state, trace)
 
             elif plan.intent == IntentType.ALTERNATIVE_SEARCH:
                 response_text = self._handle_alternative_search(plan, state, trace)
@@ -579,6 +622,80 @@ class AgentOrchestrator:
             lines.append(f"\n*(Còn {remaining} thiết bị khác. Bạn có thể nhắn 'xem tiếp' để xem trang kế tiếp hoặc nhập tên để tra cứu nhanh)*")
 
         return ("\n".join(lines), None)
+
+    def _handle_low_stock_inventory(
+        self,
+        plan: QueryPlan,
+        state: ConversationState,
+        trace: AgentTrace,
+    ) -> str:
+        trace.selected_tool = "get_low_stock_inventory"
+        configured_default = getattr(settings, "LOW_STOCK_THRESHOLD", 5)
+
+        thresh = plan.low_stock_threshold
+        op = plan.low_stock_operator or "<="
+
+        if thresh is None or not isinstance(thresh, int) or thresh <= 0:
+            thresh = configured_default
+
+        trace.tool_arguments = {
+            "threshold": thresh,
+            "operator": op,
+        }
+
+        result = self.tools.get_low_stock_inventory(threshold=thresh, operator=op)
+        items = result["items"]
+        total = result["total_matches"]
+        eff_thresh = result["threshold"]
+        eff_op = result["operator"]
+
+        trace.tool_result_count = total
+        trace.tool_result_type = "low_stock_inventory"
+        trace.selected_result_ids = [it["equipment_id"] for it in items]
+
+        # Update conversation state with matching items
+        serialized_items = [
+            {
+                "EquipmentID": it["equipment_id"],
+                "EquipmentName": it["equipment_name"],
+                "Quantity": it["recorded_quantity"],
+                "Unit": it["unit"],
+                "Location": it["location"],
+                "Category": it["category"],
+            }
+            for it in items
+        ]
+        state_manager.set_result_set(state, serialized_items, result_type="equipment", page=1, page_size=15)
+
+        op_desc = f"dưới {eff_thresh} cái" if eff_op == "<" else f"từ {eff_thresh} cái trở xuống"
+
+        if total == 0:
+            trace.response_mode = "grounded"
+            return (
+                f"Hiện tại trong kho không có thiết bị nào có số lượng tồn {op_desc}. "
+                f"Toàn bộ thiết bị đều đang có số lượng ghi nhận trên ngưỡng này.\n\n"
+                f"*(Lưu ý: Báo cáo dựa trên số lượng tồn kho ghi nhận trong hệ thống)*"
+            )
+
+        # Build Markdown table
+        lines = [
+            f"📊 **Báo cáo thiết bị có số lượng tồn thấp (ngưỡng: {op_desc})**\n",
+            f"Hệ thống ghi nhận **{total}** thiết bị đạt điều kiện tồn kho:\n",
+            "| Tên thiết bị | Số lượng ghi nhận | Đơn vị | Vị trí | Mã thiết bị |",
+            "| :--- | :---: | :---: | :--- | :--- |",
+        ]
+
+        for it in items:
+            lines.append(
+                f"| **{it['equipment_name']}** | {it['recorded_quantity']} | {it['unit']} | {it['location']} | `{it['equipment_id']}` |"
+            )
+
+        lines.append(
+            f"\n*(Lưu ý: Danh sách trên thể hiện số lượng ghi nhận trong cơ sở dữ liệu kho nhằm hỗ trợ nhận diện các thiết bị có thể cần bổ sung. Hệ thống không tự động đưa ra quyết định mua hàng hay tạo đơn mua sắm).* "
+        )
+
+        trace.response_mode = "grounded"
+        return "\n".join(lines)
 
     def _handle_equipment_count(
         self,

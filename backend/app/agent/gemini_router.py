@@ -30,6 +30,7 @@ Allowed intents (choose exactly one matching the user's primary goal):
 - quantity_sufficiency: user asks if an equipment has enough for a requested quantity (e.g. "có đủ 50 cái không?").
 - alternative_search: user asks for replacement, substitute, similar alternative equipment (e.g. "loại nào tương tự", "thiết bị thay thế", "hết rồi có loại nào khác").
 - external_sourcing: user explicitly asks where to buy/purchase, external shops, pricing options outside the warehouse (e.g. "tìm nơi bán", "mua ở đâu", "shop nào có").
+- low_stock_inventory: user asks for equipment with low stock, nearly depleted inventory, or needing replenishment (e.g. "thiết bị nào sắp hết", "món nào còn ít", "dưới 5 cái", "số lượng tồn thấp", "cần bổ sung", "có món nào sắp hết không").
 - request_create: user wants to borrow equipment or initiate a borrow request.
 - return_request: user wants to return borrowed equipment.
 - my_requests: user asks to view/check the status of their own borrow requests.
@@ -66,6 +67,15 @@ CRITICAL RULES FOR EXTRACTION:
    - "cái thứ 2", "món thứ 1" -> reference.ordinal_index = 2 (or 1), reference.type = "previous_result".
    - "những người đó là ai" -> reference.is_group_reference = true, reference.type = "group_people".
    - "những người nào bị xung đột" -> reference.is_group_reference = true, reference.type = "group_people".
+6. Low-Stock Inventory Requests:
+   - If user asks about equipment running low, nearly depleted, or needing replenishment:
+     - intent = "low_stock_inventory"
+     - Do NOT extract "sắp hết", "còn ít", "bổ sung", "tồn thấp" as equipment_name or keywords.
+     - If a numeric threshold is explicitly stated:
+       - "dưới 10 cái", "dưới 5" -> low_stock_threshold = 10 (or 5), low_stock_operator = "<"
+       - "5 cái trở xuống", "không quá 5 cái" -> low_stock_threshold = 5, low_stock_operator = "<="
+     - If no numeric threshold is stated (e.g. "thiết bị nào sắp hết", "còn ít", "cần bổ sung"):
+       - low_stock_threshold = null, low_stock_operator = null
 
 Return JSON matching this exact structure:
 {
@@ -98,6 +108,8 @@ Return JSON matching this exact structure:
     "is_pronoun": boolean,
     "is_group_reference": boolean
   },
+  "low_stock_threshold": integer | null,
+  "low_stock_operator": string | null,
   "external_search_requested": boolean,
   "is_negation_or_cancellation": boolean,
   "clarification_needed": boolean,

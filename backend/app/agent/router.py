@@ -185,6 +185,7 @@ def extract_constraints(text: str) -> ExtractedConstraints:
         "chiếc", "bộ", "con", "item", "items", "thì", "khi", "sử", "dụng", "hãy",
         "vui", "lòng", "hộ", "máy", "đồ", "ai", "nào", "chỉ", "thôi", "hỏi", "hãy",
         "món", "thứ", "của", "tôi", "em", "bác", "project", "dự", "án",
+        "sắp", "hết", "ít", "thấp", "cạn",
     }
     keywords = [w for w in raw_tokens if w not in stop_words and len(w) > 1]
     constraints.keywords = keywords
@@ -374,6 +375,43 @@ class QueryRouter:
             plan.entity_id = None
             plan.entity_name = None
             plan.constraints = ExtractedConstraints()
+            return plan
+
+        # 3.2.0 Check low-stock inventory report
+        is_low_stock = (
+            any(p in lower_text for p in [
+                "sắp hết", "còn ít", "tồn thấp", "số lượng tồn thấp", "cần bổ sung", "sắp cạn", "tồn kho thấp",
+            ])
+            or (
+                any(w in lower_text for w in ["kho", "trong kho", "thiết bị", "món"])
+                and any(w in lower_text for w in ["sắp hết", "còn ít", "cần bổ sung", "hết hàng", "sắp cạn"])
+            )
+            or bool(re.search(r"(?:dưới|còn dưới)\s+(\d+)\s*(?:cái|chiếc|món|bộ)?", lower_text))
+            or bool(re.search(r"(\d+)\s*(?:cái|chiếc|món|bộ)?\s*trở\s*xuống", lower_text))
+            or bool(re.search(r"không\s*quá\s*(\d+)", lower_text))
+        )
+        if is_low_stock and not plan.entity_id and not any(w in lower_text for w in ["mượn", "borrow", "trả", "return"]):
+            plan.intent = IntentType.LOW_STOCK_INVENTORY
+            plan.entity_id = None
+            plan.entity_name = None
+            plan.constraints.keywords = []
+
+            m_strict = re.search(r"(?:còn\s+)?dưới\s+(\d+)", lower_text)
+            m_inc = re.search(r"(\d+)\s*(?:cái|chiếc|món|bộ)?\s*trở\s*xuống", lower_text)
+            m_no_more = re.search(r"không\s*quá\s*(\d+)", lower_text)
+
+            if m_strict:
+                plan.low_stock_threshold = int(m_strict.group(1))
+                plan.low_stock_operator = "<"
+            elif m_inc:
+                plan.low_stock_threshold = int(m_inc.group(1))
+                plan.low_stock_operator = "<="
+            elif m_no_more:
+                plan.low_stock_threshold = int(m_no_more.group(1))
+                plan.low_stock_operator = "<="
+            else:
+                plan.low_stock_threshold = None
+                plan.low_stock_operator = None
             return plan
 
         # 3.2.1 Check existence inquiry: "Kho có CANInterface XYZ không?", "Kho có TU1-001 không?"

@@ -59,6 +59,81 @@ class AgentTools:
         """Get full details of a specific equipment."""
         return self.equipment_repo.get_by_id(equipment_id.strip().upper())
 
+    def get_low_stock_inventory(
+        self,
+        threshold: Optional[int] = None,
+        operator: str = "<=",
+    ) -> dict[str, Any]:
+        """Retrieve equipment records with recorded stock quantity meeting low-stock threshold.
+
+        Args:
+            threshold: Positive integer threshold. Defaults to settings.LOW_STOCK_THRESHOLD if None.
+            operator: Comparison operator ('<' or '<='). Defaults to '<='.
+
+        Returns:
+            dict with threshold, operator, total_matches, and items list.
+        """
+        configured_default = getattr(settings, "LOW_STOCK_THRESHOLD", 5)
+        if threshold is None or not isinstance(threshold, int) or threshold <= 0:
+            effective_threshold = configured_default
+        else:
+            effective_threshold = threshold
+
+        effective_operator = operator if operator in ["<", "<="] else "<="
+
+        all_eq = self.equipment_repo.get_all()
+        matching_items: list[dict[str, Any]] = []
+
+        for eq in all_eq:
+            raw_qty = None
+            if hasattr(eq, "quantity_total"):
+                val = getattr(eq, "quantity_total")
+                if val is not None:
+                    raw_qty = val
+            if raw_qty is None and hasattr(eq, "quantity"):
+                val = getattr(eq, "quantity")
+                if val is not None:
+                    raw_qty = val
+
+            if raw_qty is None:
+                continue
+
+            # Ensure valid numeric value
+            if isinstance(raw_qty, (int, float)):
+                qty_val = int(raw_qty)
+            elif isinstance(raw_qty, str) and raw_qty.strip().lstrip("-").isdigit():
+                try:
+                    qty_val = int(raw_qty.strip())
+                except ValueError:
+                    continue
+            else:
+                continue
+
+            if effective_operator == "<":
+                is_match = (qty_val < effective_threshold)
+            else:
+                is_match = (qty_val <= effective_threshold)
+
+            if is_match:
+                matching_items.append({
+                    "equipment_id": eq.equipment_id,
+                    "equipment_name": eq.equipment_name,
+                    "recorded_quantity": qty_val,
+                    "unit": eq.unit or "cái",
+                    "location": eq.location or "Chưa xác định",
+                    "category": eq.category or "Chưa phân loại",
+                })
+
+        # Deterministic sort: ascending by recorded_quantity, then tie-break by equipment_id
+        matching_items.sort(key=lambda x: (x["recorded_quantity"], str(x["equipment_id"])))
+
+        return {
+            "threshold": effective_threshold,
+            "operator": effective_operator,
+            "total_matches": len(matching_items),
+            "items": matching_items,
+        }
+
     def get_equipment_count(self, equipment_id: str) -> dict[str, Any]:
         """Get deterministic quantity information for an equipment."""
         eq = self.equipment_repo.get_by_id(equipment_id.strip().upper())

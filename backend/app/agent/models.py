@@ -25,6 +25,7 @@ class IntentType(str, Enum):
     EQUIPMENT_CONDITION_QUERY = "equipment_condition_query"
     ALTERNATIVE_SEARCH = "alternative_search"
     EXTERNAL_SOURCING = "external_sourcing"
+    LOW_STOCK_INVENTORY = "low_stock_inventory"
     
     # Request intents
     REQUEST_CREATE = "request_create"
@@ -107,6 +108,8 @@ class GeminiRouterOutput(BaseModel):
     clarification_needed: bool = False
     clarification_reason: Optional[str] = None
     reasoning: Optional[str] = None
+    low_stock_threshold: Optional[int] = None
+    low_stock_operator: Optional[str] = None
 
 
 class ExtractedConstraints(BaseModel):
@@ -151,6 +154,8 @@ class QueryPlan(BaseModel):
     ask_auto_approve: bool = False
     needs_clarification: bool = False
     raw_message: str = ""
+    low_stock_threshold: Optional[int] = None
+    low_stock_operator: Optional[str] = None
 
 
 class PendingForm(BaseModel):

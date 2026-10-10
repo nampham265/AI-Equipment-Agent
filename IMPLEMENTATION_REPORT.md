@@ -168,3 +168,80 @@ git checkout feat/full-agent-architecture-upgrade
 git revert HEAD  # or git reset --hard 4a679a1
 ```
 All code changes were strictly modularized within `backend/app/agent/` and `backend/tests/`.
+
+---
+
+## 10. Low-Stock Inventory Report (`low_stock_inventory`)
+
+### 10.1 Observed Problem & Root Cause
+- **Observed Message:** `"Hiện tại trong kho có thiết bị nào sắp hết không"`
+- **Previous Response:** `"Không tìm thấy thiết bị sắp hết trong dữ liệu hiện tại."`
+- **Root Cause Identified via Trace:**
+  - Gemini classified the message under `equipment_search` and extracted `"sắp hết"` into `constraints.keywords = ["sắp hết"]`.
+  - The orchestrator searched for equipment matching keyword `"sắp hết"`, found 0 records, and returned `"Không tìm thấy thiết bị sắp hết trong dữ liệu hiện tại"`.
+  - Fallback in `QueryRouter` also treated `"sắp"` and `"hết"` as search keywords because words like `"sắp"` and `"hết"` were not in `stop_words`.
+
+### 10.2 Architectural Implementation
+1. **First-Class Intent:**
+   - Added `IntentType.LOW_STOCK_INVENTORY = "low_stock_inventory"` to `backend/app/agent/models.py`.
+   - Added typed fields `low_stock_threshold: Optional[int] = None` and `low_stock_operator: Optional[str] = None` to `GeminiRouterOutput` and `QueryPlan`.
+2. **Gemini Structured Router:**
+   - Updated `_ROUTER_SYSTEM_INSTRUCTION` in `backend/app/agent/gemini_router.py` with the `low_stock_inventory` intent, typed schema fields, and extraction rules preventing `"sắp hết"` or `"còn ít"` from being extracted as equipment names or keywords.
+3. **Configurable Threshold:**
+   - Added `LOW_STOCK_THRESHOLD: int = 5` in `backend/app/core/config.py`.
+   - Default operator: `<= LOW_STOCK_THRESHOLD` (when user says "sắp hết" without a number).
+   - Strict operator: `< N` (e.g., "dưới 5 cái" -> `Quantity < 5`).
+   - Inclusive operator: `<= N` (e.g., "5 cái trở xuống", "không quá 5 cái" -> `Quantity <= 5`).
+   - Query-specific override: "dưới 10 cái" sets threshold=10 for that turn only.
+4. **Deterministic Backend Tool:**
+   - Implemented `get_low_stock_inventory(threshold: Optional[int], operator: str)` in `backend/app/agent/tools.py`.
+   - Reads inventory from `Equipment` table, parses recorded quantity safely, filters non-numeric/missing data without inventing numbers, and performs deterministic tie-break sorting: ascending by recorded quantity, tie-break by `EquipmentID`.
+5. **Human-Readable Presentation:**
+   - Formats a clear Markdown table with headers:
+     `| Tên thiết bị | Số lượng ghi nhận | Đơn vị | Vị trí | Mã thiết bị |`
+   - Explicitly notes threshold used, total matching items, and emphasizes that records represent recorded stock for replenishment consideration rather than automatic purchasing decisions.
+   - For 0 matches, returns an explicit no-low-stock notification without ever claiming an item named "sắp hết" was missing.
+6. **Robust Fallback & Stop Words:**
+   - Added `"sắp"`, `"hết"`, `"ít"`, `"thấp"`, `"cạn"` to `stop_words` in `backend/app/agent/router.py`.
+   - Updated `QueryRouter.route_message` to detect low-stock patterns and extract thresholds/operators deterministically.
+   - Added guard in `_map_gemini_to_plan` guaranteeing that low stock requests never fall through to ordinary search.
+
+### 10.3 Empirical Verification Trace
+Turn execution on `POST /api/agent/message` with `"Hiện tại trong kho có thiết bị nào sắp hết không"`:
+```json
+{
+  "routing_mode": "llm_primary",
+  "llm_router_called": true,
+  "llm_intent": "low_stock_inventory",
+  "resolved_intent": "low_stock_inventory",
+  "selected_tool": "get_low_stock_inventory",
+  "fallback_used": false,
+  "tool_arguments": {
+    "threshold": 5,
+    "operator": "<="
+  },
+  "tool_result_count": 52
+}
+```
+
+Turn execution with `"Những thiết bị nào còn dưới 5 cái?"`:
+```json
+{
+  "routing_mode": "llm_primary",
+  "llm_router_called": true,
+  "llm_intent": "low_stock_inventory",
+  "resolved_intent": "low_stock_inventory",
+  "selected_tool": "get_low_stock_inventory",
+  "fallback_used": false,
+  "tool_arguments": {
+    "threshold": 5,
+    "operator": "<"
+  },
+  "tool_result_count": 44
+}
+```
+
+### 10.4 Test Suite Summary
+- `backend/tests/test_low_stock_report.py`: **17 / 17 passed**.
+- `backend/tests/test_hotfix_regression.py`: **25 / 25 passed**.
+- Total backend automated test suite: **202 / 202 passed**.
