@@ -134,8 +134,29 @@ def _map_gemini_to_plan(
     )
     plan.ask_auto_approve = check_ask_auto_approve(raw_message.lower())
 
-    # Check low-stock inventory intent guard
     lower_msg = raw_message.lower()
+
+    # Check out-of-stock inventory intent guard (strictly Quantity == 0)
+    is_out_of_stock_msg = (
+        "sắp hết" not in lower_msg
+        and (
+            any(p in lower_msg for p in [
+                "hết trong kho", "đã hết hàng", "hết hàng", "còn 0 cái", "hết sạch", "hết rồi không",
+                "thiết bị nào hết", "món nào hết", "đã hết", "hết rồi", "hết chưa", "tồn bằng 0", "số lượng bằng 0"
+            ])
+            or (
+                any(w in lower_msg for w in ["kho", "trong kho", "thiết bị", "món"])
+                and any(w in lower_msg for w in ["hết hàng", "hết rồi", "còn 0 cái", "hết sạch", "nào hết"])
+            )
+        )
+    ) and not plan.entity_id and not any(w in lower_msg for w in ["mượn", "borrow", "trả", "return"])
+
+    if is_out_of_stock_msg:
+        plan.intent = IntentType.OUT_OF_STOCK_INVENTORY
+        plan.entity_id = None
+        plan.entity_name = None
+
+    # Check low-stock inventory intent guard
     is_low_stock_msg = (
         any(p in lower_msg for p in [
             "sắp hết", "còn ít", "tồn thấp", "số lượng tồn thấp", "cần bổ sung", "sắp cạn", "tồn kho thấp",
@@ -172,14 +193,56 @@ def _map_gemini_to_plan(
         plan.entity_id = None
         plan.entity_name = None
 
+    # Check personal loan inquiries
+    is_my_loan_or_req = (
+        any(p in lower_msg for p in [
+            "của tôi", "của mình", "tôi gửi", "mình gửi", "tôi tạo", "mình tạo",
+            "hiện mình đang mượn", "mình đang mượn", "tôi đang mượn", "mình mượn mấy thiết bị",
+            "tôi mượn mấy thiết bị", "đang mượn mấy thiết bị", "hiện tôi đang mượn", "mình đang mượn những thiết bị nào"
+        ])
+    )
+    if is_my_loan_or_req:
+        if plan.intent in [IntentType.PENDING_REQUEST_LIST, IntentType.PENDING_REQUEST_COUNT, IntentType.ACTIVE_LOANS, IntentType.UNKNOWN]:
+            plan.intent = IntentType.MY_REQUESTS
+        elif any(p in lower_msg for p in ["hiện mình đang mượn", "mình đang mượn", "tôi đang mượn", "mấy thiết bị"]):
+            plan.intent = IntentType.MY_REQUESTS
+            plan.status_filter = "Borrowed"
+
+    # Person refinement follow-up: "Nếu chỉ riêng Nam Phạm thôi thì sao"
+    m_person = re.search(r"(?:nếu\s+)?(?:chỉ\s+)?riêng\s+([A-Za-zÀ-ỹ\s]+?)(?:\s+thôi)?(?:\s+thì\s+sao)?\??$", lower_msg)
+    if m_person and (
+        state.last_result_type in ["user_requests", "active_loans", "active_borrowers"]
+        or state.last_intent in [IntentType.MY_REQUESTS, IntentType.ACTIVE_LOANS, IntentType.ACTIVE_BORROWERS, IntentType.ACTIVE_BORROWERS_COUNT]
+    ):
+        target_person_name = m_person.group(1).strip()
+        plan.intent = IntentType.MY_REQUESTS if state.last_result_type == "user_requests" else IntentType.ACTIVE_LOANS
+        plan.entity_name = target_person_name
+        plan.status_filter = "Borrowed"
+
+    # Hypothetical sufficiency follow-up check: "Nếu mình cần mượn 30 cái thì sao?", "Nếu chỉ mượn 5 cái thì sao?"
+    m_hypo_qty = re.search(r"(?:nếu\s+)?(?:mình\s+|tôi\s+|em\s+)?(?:chỉ\s+)?(?:cần\s+|muốn\s+|lấy\s+)?(?:mượn\s+)?(\d+)\s*(?:cái|chiếc|con|bộ)?(?:\s+thì\s+sao|\s+được\s+không|\s+có\s+đủ\s+không|\s+đủ\s+không|\s+còn\s+dư\s+không)?\??$", lower_msg)
+    if m_hypo_qty and (state.active_equipment or state.active_equipment_ids) and any(w in lower_msg for w in ["thì sao", "được không", "đủ không", "nếu", "chỉ"]):
+        try:
+            qty_val = int(m_hypo_qty.group(1))
+            if 0 < qty_val < 10000:
+                plan.quantity = qty_val
+                active_eq = state.active_equipment or (state.last_selected_item if state.last_result_type == "equipment" else None)
+                if active_eq:
+                    plan.entity_id = active_eq.get("EquipmentID") or active_eq.get("equipment_id")
+                    plan.entity_name = active_eq.get("EquipmentName") or active_eq.get("equipment_name")
+                elif state.active_equipment_ids:
+                    plan.entity_id = state.active_equipment_ids[0]
+                plan.intent = IntentType.AVAILABILITY_QUERY
+        except (ValueError, IndexError):
+            pass
+
     # Enrich status filter for my_requests if not set
     if plan.intent == IntentType.MY_REQUESTS and not plan.status_filter:
-        lower_msg = raw_message.lower()
         if any(w in lower_msg for w in ["đã được duyệt", "đã duyệt", "được duyệt", "approved"]):
             plan.status_filter = "Approved"
         elif any(w in lower_msg for w in ["chờ duyệt", "còn chờ", "đang chờ", "chưa duyệt", "pending"]):
             plan.status_filter = "Pending"
-        elif any(w in lower_msg for w in ["đang mượn", "đang giữ", "chưa trả", "borrowed"]):
+        elif any(w in lower_msg for w in ["đang mượn", "đang giữ", "chưa trả", "borrowed", "mấy thiết bị"]):
             plan.status_filter = "Borrowed"
         elif any(w in lower_msg for w in ["bị từ chối", "từ chối", "rejected", "bác bỏ"]):
             plan.status_filter = "Rejected"
@@ -213,7 +276,10 @@ def _map_gemini_to_plan(
                 plan.entity_id = str(resolved_item.get("EquipmentID") or resolved_item.get("equipment_id") or "")
                 plan.entity_name = str(resolved_item.get("EquipmentName") or resolved_item.get("equipment_name") or "")
             elif state.last_result_type in ["request", "user_requests", "overdue_loans", "active_loans"]:
-                if plan.intent in [IntentType.EQUIPMENT_DETAIL, IntentType.UNKNOWN]:
+                if (
+                    plan.intent in [IntentType.EQUIPMENT_DETAIL, IntentType.UNKNOWN, IntentType.USAGE_QUERY, IntentType.PROJECT_USAGE_QUERY]
+                    or any(w in lower_msg for w in ["project nào", "dự án nào", "của ai", "thiết bị gì", "đơn"])
+                ):
                     plan.intent = IntentType.REQUEST_DETAIL
                 if not plan.target_request_id:
                     plan.target_request_id = _extract_int_req_id(resolved_item)
@@ -303,7 +369,7 @@ class AgentOrchestrator:
             if self.gemini_router:
                 llm_called = True
                 try:
-                    gemini_out = self.gemini_router.classify_message(raw_message, state, user.role)
+                    gemini_out = self.gemini_router.classify_message(raw_message, user_role=user.role, state=state)
                     if gemini_out:
                         llm_intent_name = gemini_out.intent.value if hasattr(gemini_out.intent, "value") else str(gemini_out.intent)
                         plan = _map_gemini_to_plan(gemini_out, raw_message, state)
@@ -322,7 +388,7 @@ class AgentOrchestrator:
             if self.gemini_router:
                 llm_called = True
                 try:
-                    gemini_out = self.gemini_router.classify_message(raw_message, state, user.role)
+                    gemini_out = self.gemini_router.classify_message(raw_message, user_role=user.role, state=state)
                     if gemini_out:
                         llm_intent_name = gemini_out.intent.value if hasattr(gemini_out.intent, "value") else str(gemini_out.intent)
                 except Exception as ex:
@@ -367,6 +433,8 @@ class AgentOrchestrator:
                 "entity_name": plan.entity_name,
                 "target_request_id": plan.target_request_id,
                 "ordinal_index": plan.ordinal_index,
+                "low_stock_threshold": plan.low_stock_threshold,
+                "low_stock_operator": plan.low_stock_operator,
             },
             response_mode="grounded",
         )
@@ -381,6 +449,9 @@ class AgentOrchestrator:
 
             elif plan.intent == IntentType.EQUIPMENT_SEARCH:
                 response_text, action_payload = self._handle_equipment_search(plan, state, trace)
+
+            elif plan.intent == IntentType.OUT_OF_STOCK_INVENTORY:
+                response_text = self._handle_out_of_stock_inventory(plan, state, trace)
 
             elif plan.intent == IntentType.LOW_STOCK_INVENTORY:
                 response_text = self._handle_low_stock_inventory(plan, state, trace)
@@ -447,7 +518,7 @@ class AgentOrchestrator:
                 response_text = self._handle_overdue_borrowers(state, trace)
 
             elif plan.intent == IntentType.ACTIVE_LOANS:
-                response_text = self._handle_active_loans(state, trace)
+                response_text = self._handle_active_loans(plan, user, state, trace)
 
             elif plan.intent == IntentType.ACTIVE_LOANS_COUNT:
                 response_text = self._handle_active_loans_count(state, trace)
@@ -658,6 +729,68 @@ class AgentOrchestrator:
 
         return ("\n".join(lines), None)
 
+    def _handle_out_of_stock_inventory(
+        self,
+        plan: QueryPlan,
+        state: ConversationState,
+        trace: AgentTrace,
+    ) -> str:
+        trace.selected_tool = "get_out_of_stock_inventory"
+        trace.tool_arguments = {}
+
+        result = self.tools.get_out_of_stock_inventory()
+        items = result["items"]
+        total = result["total_matches"]
+
+        trace.tool_result_count = total
+        trace.tool_result_type = "out_of_stock_inventory"
+        trace.selected_result_ids = [it["equipment_id"] for it in items]
+
+        # Update conversation state with matching items
+        serialized_items = [
+            {
+                "EquipmentID": it["equipment_id"],
+                "EquipmentName": it["equipment_name"],
+                "Quantity": it["recorded_quantity"],
+                "Unit": it["unit"],
+                "Location": it["location"],
+                "Category": it["category"],
+            }
+            for it in items
+        ]
+        state_manager.set_result_set(state, serialized_items, result_type="equipment", page=1, page_size=15)
+
+        if total == 0:
+            trace.response_mode = "grounded"
+            return (
+                "Hiện tại trong kho không có thiết bị nào đã hết hàng (số lượng ghi nhận = 0). "
+                "Toàn bộ thiết bị đều đang có số lượng tồn kho > 0.\n\n"
+                "*(Lưu ý: Báo cáo dựa trên số lượng tồn kho ghi nhận trong hệ thống)*"
+            )
+
+        # Build Markdown table
+        lines = [
+            "📊 **Báo cáo thiết bị đã hết hàng trong kho (số lượng ghi nhận: 0)**\n",
+            f"Hệ thống ghi nhận **{total}** thiết bị có số lượng tồn kho bằng 0:\n",
+            "| Tên thiết bị | Số lượng ghi nhận | Đơn vị | Vị trí | Mã thiết bị |",
+            "| :--- | :---: | :---: | :--- | :--- |",
+        ]
+
+        for it in items:
+            name_cell = escape_markdown_cell(it.get("equipment_name") or "Chưa đặt tên", wrap_bold=True)
+            qty_cell = escape_markdown_cell(it.get("recorded_quantity") if it.get("recorded_quantity") is not None else 0)
+            unit_cell = escape_markdown_cell(it.get("unit") or "cái")
+            loc_cell = escape_markdown_cell(it.get("location") or "Chưa xác định")
+            id_cell = escape_markdown_cell(it.get("equipment_id") or "N/A", wrap_code=True)
+            lines.append(f"| {name_cell} | {qty_cell} | {unit_cell} | {loc_cell} | {id_cell} |")
+
+        lines.append(
+            "\n*(Lưu ý: Danh sách trên thể hiện các thiết bị có số lượng ghi nhận bằng 0 trong kho. Vui lòng liên hệ Quản lý nếu cần bổ sung).* "
+        )
+
+        trace.response_mode = "grounded"
+        return "\n".join(lines)
+
     def _handle_low_stock_inventory(
         self,
         plan: QueryPlan,
@@ -754,14 +887,36 @@ class AgentOrchestrator:
             elif len(matched) > 1:
                 serialized_results = [_to_dict(r) for r in matched]
                 state_manager.set_result_set(state, serialized_results, result_type="equipment", page=1, page_size=15)
+
+                unique_types = set(r.equipment_id for r in matched)
+                is_type_count = any(w in plan.raw_message.lower() for w in ["bao nhiêu loại", "mấy loại", "có bao nhiêu loại", "có mấy loại", "số loại"])
+
+                if is_type_count:
+                    total_units = sum(r.quantity_total for r in matched)
+                    target_label = plan.entity_name or " ".join(plan.constraints.keywords) or "thiết bị"
+                    lines = [
+                        f"📊 Hiện tại trong kho có **{len(unique_types)} loại** {target_label} khác nhau (với tổng cộng **{total_units}** đơn vị/cái).\n",
+                        "Dưới đây là một số loại tiêu biểu:\n",
+                    ]
+                    for r in matched[:8]:
+                        lines.append(
+                            f"• **{r.equipment_name}** (`{r.equipment_id}`): {r.quantity_total} {r.unit or 'cái'} (Vị trí: {r.location or 'N/A'})"
+                        )
+                    if len(matched) > 8:
+                        lines.append(f"\n*(Còn {len(matched) - 8} loại khác. Bạn có thể nhắn 'xem tiếp' để xem danh sách)*")
+                    return "\n".join(lines)
+
                 lines = [f"📊 Tìm thấy **{len(matched)}** thiết bị phù hợp trong kho:\n"]
-                for r in matched:
+                for r in matched[:10]:
                     c = self.tools.get_equipment_count(r.equipment_id)
+                    incon_tag = " ⚠️ *(Số liệu bất thường: Đang mượn > Tồn kho)*" if c.get("has_inconsistency") else ""
                     lines.append(
                         f"• **{r.equipment_name}** (`{r.equipment_id}`): "
                         f"Khả dụng **{c.get('available_quantity', 0)}** {c.get('unit', 'cái')} "
-                        f"(Tổng: {c.get('quantity_total', 0)} | Đang mượn: {c.get('borrowed_quantity', 0)} | Vị trí: {c.get('location', 'N/A')})"
+                        f"(Tổng: {c.get('quantity_total', 0)} | Đang mượn: {c.get('borrowed_quantity', 0)} | Vị trí: {c.get('location', 'N/A')}){incon_tag}"
                     )
+                if len(matched) > 10:
+                    lines.append(f"\n*(Còn {len(matched) - 10} thiết bị khác)*")
                 return "\n".join(lines)
             elif len(matched) == 0:
                 clean_target = plan.entity_name or query_text
@@ -799,7 +954,10 @@ class AgentOrchestrator:
             unit=info["unit"],
             has_date_range=bool(plan.needed_from and plan.needed_to),
         )
-        return f"{explanation}\n- **Vị trí lưu trữ:** {info['location']}"
+        res_text = f"{explanation}\n- **Vị trí lưu trữ:** {info['location']}"
+        if info.get("has_inconsistency") and info.get("inconsistency_note"):
+            res_text += f"\n\n{info['inconsistency_note']}"
+        return res_text
 
     def _handle_quantity_sufficiency(
         self,
@@ -907,15 +1065,94 @@ class AgentOrchestrator:
     ) -> str:
         trace.selected_tool = "check_availability"
         eq_id = plan.entity_id or (state.active_equipment.get("EquipmentID") if state.active_equipment else None)
+
+        if not eq_id:
+            query_text = plan.entity_name or " ".join(plan.constraints.keywords)
+            if query_text:
+                matches = self.tools.search_equipment(plan.constraints, query=query_text)
+                if len(matches) == 1:
+                    eq_id = matches[0].equipment_id
+                elif len(matches) > 1:
+                    for m in matches:
+                        if m.equipment_name.lower().strip() == query_text.lower().strip():
+                            eq_id = m.equipment_id
+                            break
+                    if not eq_id:
+                        eq_id = matches[0].equipment_id
+
         if not eq_id:
             return "Bạn muốn kiểm tra tính khả dụng của thiết bị nào?"
+
+        count_info = self.tools.get_equipment_count(eq_id)
+        if not count_info.get("found"):
+            return f"Không tìm thấy thiết bị có mã `{eq_id}` trong kho."
+
+        state.active_equipment = {
+            "EquipmentID": count_info["equipment_id"],
+            "EquipmentName": count_info["equipment_name"],
+            "Quantity": count_info["quantity_total"],
+            "Location": count_info["location"],
+        }
+        state.active_equipment_ids = [count_info["equipment_id"]]
+
+        eq_name = count_info.get("equipment_name", eq_id)
+        total_qty = count_info.get("quantity_total", 0)
+        borrowed_qty = count_info.get("borrowed_quantity", 0)
+        approved_qty = count_info.get("approved_quantity", 0)
+        avail_now = count_info.get("available_quantity", 0)
+        unit = count_info.get("unit", "cái")
+        location = count_info.get("location", "N/A")
+
+        lower_msg = plan.raw_message.lower()
+        asks_usage = any(w in lower_msg for w in [
+            "ai sử dụng", "ai dùng", "đang được ai sử dụng", "có ai dùng", "có ai mượn", "ai đang mượn"
+        ])
+
+        req_qty = plan.quantity
+        if not req_qty:
+            m_qty = re.search(r"(?:tầm|khoảng|cỡ|mượn|cần)?\s*(\d+)\s*(?:cái|chiếc|con|bộ)?", lower_msg)
+            if m_qty:
+                try:
+                    val = int(m_qty.group(1))
+                    if 0 < val < 10000:
+                        req_qty = val
+                except ValueError:
+                    pass
+
+        asks_sufficiency = (req_qty is not None) or any(w in lower_msg for w in ["còn dư", "đủ không", "có đủ", "còn đủ", "đáp ứng đủ"])
+
+        if asks_usage or asks_sufficiency:
+            lines = [f"🔍 **Thông tin khả dụng & sử dụng thiết bị {eq_name}** (`{eq_id}`):\n"]
+
+            if borrowed_qty > 0:
+                lines.append(f"• **Tình trạng sử dụng:** Hiện đang có **{borrowed_qty} {unit}** được mượn và đang sử dụng trong các dự án.")
+            else:
+                lines.append(f"• **Tình trạng sử dụng:** Hiện tại **không có ai đang sử dụng** thiết bị này (chưa có đơn đang mượn).")
+
+            lines.append(f"• **Tồn kho hiện tại:** Tổng cộng **{total_qty} {unit}** (Vị trí: **{location}**).")
+            lines.append(f"• **Số lượng khả dụng:** **{avail_now} {unit}** (đã trừ {borrowed_qty} đang mượn và {approved_qty} đã duyệt).")
+
+            if req_qty:
+                if avail_now >= req_qty:
+                    lines.append(
+                        f"\n✅ **Khả năng đáp ứng:** Kho **hoàn toàn còn dư đủ** để bạn mượn **{req_qty} {unit}** "
+                        f"({avail_now} {unit} khả dụng > {req_qty} {unit} yêu cầu)."
+                    )
+                else:
+                    shortage = req_qty - avail_now
+                    lines.append(
+                        f"\n⚠️ **Khả năng đáp ứng:** Kho hiện **không đủ** {req_qty} {unit} "
+                        f"(chỉ còn {avail_now} {unit} khả dụng, thiếu {shortage} {unit})."
+                    )
+
+            return "\n".join(lines)
 
         needed_from = plan.needed_from or "2026-01-01"
         needed_to = plan.needed_to or "2026-12-31"
 
         avail = self.tools.check_availability(eq_id, needed_from, needed_to)
         return (
-            f"Tính khả dụng của thiết bị `{eq_id}` (từ {needed_from} đến {needed_to}):\n"
+            f"Tính khả dụng của thiết bị **{eq_name}** (`{eq_id}`) (từ {needed_from} đến {needed_to}):\n"
             f"- Tổng số lượng: {avail['quantity_total']}\n"
             f"- Số lượng đã cam kết: {avail['committed_quantity']}\n"
             f"- Số lượng khả dụng: **{avail['available_quantity']}**\n"
@@ -930,31 +1167,69 @@ class AgentOrchestrator:
     ) -> str:
         trace.selected_tool = "search_alternative_equipment"
         target_id = plan.entity_id or (state.active_equipment.get("EquipmentID") if state.active_equipment else None)
-        if not target_id:
-            return "Bạn muốn tìm thiết bị thay thế cho thiết bị nào? Vui lòng cung cấp mã thiết bị (ví dụ: `TU1-001`)."
+        target_name = plan.entity_name or (state.active_equipment.get("EquipmentName") if state.active_equipment else None)
 
-        result = self.tools.search_alternative_equipment(target_id)
+        if not target_id and not target_name:
+            return "Bạn muốn tìm thiết bị thay thế cho thiết bị nào? Vui lòng cung cấp mã thiết bị (ví dụ: `TU2-007`) hoặc tên thiết bị."
+
+        result = self.tools.search_alternative_equipment(target_equipment_id=target_id, target_equipment_name=target_name)
         if not result.get("success"):
             return f"Không thể tìm kiếm thiết bị thay thế: {result.get('message', 'Lỗi không xác định')}"
 
         alternatives = result.get("alternatives", [])
         if not alternatives:
-            return f"Không tìm thấy thiết bị thay thế phù hợp trong kho cho `{target_id}` ({result.get('target_name', '')})."
+            return f"Không tìm thấy thiết bị thay thế tiềm năng nào trong kho cho `{target_id or target_name}` ({result.get('target_name', '')})."
 
         trace.tool_result_count = len(alternatives)
         lines = [
-            f"Gợi ý các thiết bị thay thế tiềm năng cho `{target_id}` (**{result.get('target_name')}**):\n",
-            f"*(Lưu ý: Mức độ tương đương mang tính tham khảo kỹ thuật, vui lòng kiểm tra datasheet trước khi sử dụng)*\n",
+            f"🔍 **Báo cáo đối soát thiết bị thay thế tiềm năng cho `{result.get('target_equipment_id') or target_name}` ({result.get('target_name')}):**\n",
+            f"*{result.get('official_equivalence_notice', '')}*\n",
         ]
-        for alt in alternatives:
-            eq = alt["equipment"]
-            suitability = alt["suitability_label"]
-            score = alt["score"]
-            lines.append(
-                f"- **{eq.equipment_name}** (`{eq.equipment_id}`) — Vị trí: {eq.location} — "
-                f"Số lượng: {eq.quantity_total} — Độ tương đồng: **{suitability}** (Điểm: {score}/100)"
-            )
-        return "\n".join(lines)
+
+        # Group alternatives
+        interchangeable = [a for a in alternatives if a.get("is_interchangeable")]
+        accessories = [a for a in alternatives if a.get("compatibility_status") == "ACCESSORY_NOT_SUBSTITUTE"]
+        unverified = [a for a in alternatives if not a.get("is_interchangeable") and a.get("compatibility_status") != "ACCESSORY_NOT_SUBSTITUTE"]
+
+        if interchangeable:
+            lines.append("📌 **Thiết bị cùng chức năng có tiềm năng thay thế:**")
+            for alt in interchangeable:
+                eq = alt["equipment"]
+                lbl = alt.get("display_label") or alt["suitability_label"]
+                lines.append(
+                    f"• **{eq.equipment_name}** (`{eq.equipment_id}`): "
+                    f"Đánh giá: **{lbl}** (Độ tương đồng mô tả: {alt['score']}/100)\n"
+                    f"  - **Vị trí:** {eq.location or 'Chưa rõ'} | **Số lượng:** {eq.quantity_total} {eq.unit or 'cái'}\n"
+                    f"  - **Ghi chú kỹ thuật:** {alt['technical_note']}"
+                )
+                if alt.get("matched_specs"):
+                    lines.append(f"  - **Thông số khớp:** {', '.join(alt['matched_specs'])}")
+                if alt.get("unverified_specs"):
+                    lines.append(f"  - **Cần kiểm tra thêm (Datasheet):** {', '.join(alt['unverified_specs'])}")
+            lines.append("")
+
+        if accessories:
+            lines.append("⚠️ **Phụ kiện liên quan (KHÔNG THỂ thay thế thiết bị chính):**")
+            for alt in accessories:
+                eq = alt["equipment"]
+                lbl = alt.get("display_label") or alt["suitability_label"]
+                lines.append(
+                    f"• **{eq.equipment_name}** (`{eq.equipment_id}`): "
+                    f"*{lbl}* — {alt['technical_note']} (Vị trí: {eq.location or 'Chưa rõ'})"
+                )
+            lines.append("")
+
+        if unverified:
+            lines.append("ℹ️ **Thiết bị khác nhóm / Chưa xác minh:**")
+            for alt in unverified:
+                eq = alt["equipment"]
+                lbl = alt.get("display_label") or alt["suitability_label"]
+                lines.append(
+                    f"• **{eq.equipment_name}** (`{eq.equipment_id}`): "
+                    f"*{lbl}* — {alt['technical_note']}"
+                )
+
+        return "\n".join(lines).strip()
 
     def _handle_external_sourcing(
         self,
@@ -1059,53 +1334,69 @@ class AgentOrchestrator:
         trace: AgentTrace,
     ) -> tuple[str, Optional[dict[str, Any]]]:
         trace.selected_tool = "create_borrow_request"
-        eq_id = plan.entity_id or (state.pending_form.equipment_id if state.pending_form and state.pending_form.equipment_id else None)
-        if not eq_id and state.active_equipment and state.pending_action != "borrow_select":
-            eq_id = state.active_equipment.get("EquipmentID")
-        if not eq_id and state.active_equipment_ids and state.pending_action != "borrow_select":
-            eq_id = state.active_equipment_ids[0]
+        eq_id = plan.entity_id
 
-        # Inventory pre-check when equipment ID is not resolved
+        # Check if user message specifies an equipment name or search keywords
+        search_query = plan.entity_name or " ".join(plan.constraints.keywords)
+        clean_search = re.sub(
+            r"^(?:vậy\s+)?(?:cho\s+)?(?:mình|tôi|em)?\s*(?:muốn|cần|hãy)?\s*(?:tạo\s*đơn|lập\s*đơn|đăng\s*ký)?\s*mượn\s*",
+            "",
+            search_query or "",
+            flags=re.IGNORECASE,
+        ).strip()
+        meaningful_tokens = [
+            t for t in re.findall(r"[A-Za-z0-9_À-ỹ]+", clean_search.lower())
+            if t not in {
+                "nó", "này", "đó", "món", "thiết", "bị", "nếu", "chỉ", "thôi", "thì", "sao",
+                "cho", "mình", "tôi", "em", "được", "không", "ạ", "nhé", "vậy", "tạo", "đơn",
+                "lập", "đăng", "ký", "đi", "hãy", "giúp", "với"
+            }
+        ]
+        has_genuine_search = bool(meaningful_tokens and len(" ".join(meaningful_tokens)) >= 2)
+
+        # If user explicitly specified a target equipment, search it first!
+        # Do NOT inherit stale active_equipment from prior turns!
+        if not eq_id and has_genuine_search:
+            clean_search = " ".join(meaningful_tokens)
+            matches = self.tools.search_equipment(plan.constraints, query=clean_search)
+            if len(matches) == 1:
+                eq_id = matches[0].equipment_id
+            elif len(matches) > 1:
+                serialized_results = [_to_dict(r) for r in matches]
+                state_manager.set_result_set(state, serialized_results, result_type="equipment", page=1, page_size=15)
+                state.pending_action = "borrow_select"
+                state.pending_form = PendingForm(
+                    equipment_id="",
+                    equipment_name="",
+                    quantity=plan.quantity or 1,
+                    needed_from=plan.needed_from,
+                    needed_to=plan.needed_to,
+                    project=plan.project or "",
+                    purpose=plan.purpose or "",
+                )
+                lines = [f"Tôi tìm thấy **{len(matches)}** thiết bị phù hợp với '{clean_search}' trong kho:\n"]
+                for idx, c in enumerate(matches[:10], 1):
+                    lines.append(
+                        f"{idx}. **{c.equipment_name}** (`{c.equipment_id}`) — "
+                        f"Vị trí: {c.location} | Số lượng: {c.quantity_total} {c.unit or 'cái'}"
+                    )
+                lines.append("\n*(Vui lòng chọn thiết bị bằng cách nhắn 'cái thứ 1', 'cái thứ 2' hoặc mã thiết bị để tiếp tục)*")
+                return ("\n".join(lines), None)
+            elif len(matches) == 0:
+                return (
+                    f"Không tìm thấy thiết bị nào phù hợp với '{clean_search}' trong kho để tạo yêu cầu mượn. "
+                    f"Bạn vui lòng kiểm tra lại tên hoặc đặc tính thiết bị.",
+                    None,
+                )
+
+        # Only fall back to pending form or active context if NO new search query was provided
         if not eq_id:
-            search_query = plan.entity_name or " ".join(plan.constraints.keywords)
-            clean_search = re.sub(
-                r"^(?:mình|tôi|em)?\s*(?:muốn|cần)?\s*mượn\s*",
-                "",
-                search_query or "",
-                flags=re.IGNORECASE,
-            ).strip()
-
-            if clean_search:
-                matches = self.tools.search_equipment(plan.constraints, query=clean_search)
-                if len(matches) == 1:
-                    eq_id = matches[0].equipment_id
-                elif len(matches) > 1:
-                    serialized_results = [_to_dict(r) for r in matches]
-                    state_manager.set_result_set(state, serialized_results, result_type="equipment", page=1, page_size=15)
-                    state.pending_action = "borrow_select"
-                    state.pending_form = PendingForm(
-                        equipment_id="",
-                        equipment_name="",
-                        quantity=plan.quantity or 1,
-                        needed_from=plan.needed_from,
-                        needed_to=plan.needed_to,
-                        project=plan.project or "",
-                        purpose=plan.purpose or "",
-                    )
-                    lines = [f"Tôi tìm thấy **{len(matches)}** thiết bị phù hợp với '{clean_search}' trong kho:\n"]
-                    for idx, c in enumerate(matches[:10], 1):
-                        lines.append(
-                            f"{idx}. **{c.equipment_name}** (`{c.equipment_id}`) — "
-                            f"Vị trí: {c.location} | Số lượng: {c.quantity_total} {c.unit or 'cái'}"
-                        )
-                    lines.append("\n*(Vui lòng chọn thiết bị bằng cách nhắn 'cái thứ 1', 'cái thứ 2' hoặc mã thiết bị để tiếp tục)*")
-                    return ("\n".join(lines), None)
-                elif len(matches) == 0:
-                    return (
-                        f"Không tìm thấy thiết bị nào phù hợp với '{clean_search}' trong kho để tạo yêu cầu mượn. "
-                        f"Bạn vui lòng kiểm tra lại tên hoặc đặc tính thiết bị.",
-                        None,
-                    )
+            if state.pending_form and state.pending_form.equipment_id:
+                eq_id = state.pending_form.equipment_id
+            elif state.active_equipment and state.pending_action != "borrow_select":
+                eq_id = state.active_equipment.get("EquipmentID")
+            elif state.active_equipment_ids and state.pending_action != "borrow_select":
+                eq_id = state.active_equipment_ids[0]
 
         if not eq_id:
             action = {
@@ -1178,8 +1469,41 @@ class AgentOrchestrator:
         trace: AgentTrace,
     ) -> str:
         trace.selected_tool = "list_my_requests"
-        trace.tool_arguments = {"user_email": user.user_email, "status": plan.status_filter}
-        requests = self.tools.list_my_requests(user.user_email, status=plan.status_filter)
+        target_email = user.user_email
+        target_name_display = "của bạn"
+        requests = []
+
+        if plan.entity_name:
+            searched_name = plan.entity_name.lower().strip()
+            user_name_lower = (user.user_name or "").lower().strip()
+            searched_tokens = set(re.findall(r"[A-Za-zÀ-ỹ]+", searched_name))
+            user_tokens = set(re.findall(r"[A-Za-zÀ-ỹ]+", user_name_lower))
+            is_same_user = (
+                searched_name in user_name_lower
+                or user_name_lower in searched_name
+                or (len(searched_tokens & user_tokens) >= 2)
+                or (len(searched_tokens) == 1 and searched_tokens.issubset(user_tokens))
+            )
+            if is_same_user:
+                target_email = user.user_email
+                requests = self.tools.list_my_requests(target_email, status=plan.status_filter)
+            elif not user.is_manager and not user.is_admin:
+                trace.tool_arguments = {"user_email": user.user_email, "target_person": plan.entity_name}
+                return (
+                    f"Bạn chỉ có quyền xem các thiết bị do chính mình mượn. "
+                    f"Để tra cứu thông tin mượn thiết bị của nhân sự khác ({plan.entity_name}), bạn cần có quyền Quản lý (Manager)."
+                )
+            else:
+                all_reqs = self.tools.request_repo.list_all(status=plan.status_filter)
+                requests = [
+                    r for r in all_reqs
+                    if searched_name in (r.requester_name or "").lower()
+                ]
+                target_name_display = f"của {plan.entity_name}"
+        else:
+            requests = self.tools.list_my_requests(target_email, status=plan.status_filter)
+
+        trace.tool_arguments = {"user_email": target_email, "status": plan.status_filter}
         trace.tool_result_count = len(requests)
         trace.tool_result_type = "user_requests"
         trace.response_type = "table"
@@ -1197,14 +1521,32 @@ class AgentOrchestrator:
 
         if not requests:
             if plan.status_filter == "Approved":
-                return "Bạn không có yêu cầu mượn nào ở trạng thái Đã duyệt (Approved)."
+                return f"Không có yêu cầu mượn nào {target_name_display} ở trạng thái Đã duyệt (Approved)."
             elif plan.status_filter == "Pending":
-                return "Bạn không có yêu cầu mượn nào đang chờ duyệt (Pending)."
+                return f"Không có yêu cầu mượn nào {target_name_display} đang chờ duyệt (Pending)."
             elif plan.status_filter == "Borrowed":
-                return "Hiện tại bạn không có thiết bị nào đang trong trạng thái mượn (Borrowed)."
+                return f"Hiện tại không có thiết bị nào {target_name_display} đang trong trạng thái mượn (Borrowed)."
             elif plan.status_filter == "Rejected":
-                return "Bạn không có yêu cầu mượn nào bị từ chối (Rejected)."
-            return "Bạn chưa có yêu cầu mượn thiết bị nào trong hệ thống."
+                return f"Không có yêu cầu mượn nào {target_name_display} bị từ chối (Rejected)."
+            return f"Chưa có yêu cầu mượn thiết bị nào {target_name_display} trong hệ thống."
+
+        unique_eq_types = set(r.equipment_id for r in requests)
+        total_borrowed_qty = sum(r.quantity for r in requests)
+
+        # Check follow-up list query: "Những thiết bị đó là gì"
+        is_list_detail_query = any(p in plan.raw_message.lower() for p in [
+            "những thiết bị đó là gì", "các thiết bị đó là gì", "thiết bị đó là gì",
+            "gồm những thiết bị nào", "những món đó là gì", "cụ thể là những thiết bị nào"
+        ])
+        if is_list_detail_query:
+            lines = [f"📦 **Danh sách cụ thể các thiết bị đang mượn {target_name_display}** ({len(requests)} đơn, {len(unique_eq_types)} loại thiết bị):\n"]
+            for r in requests:
+                req_id_str = getattr(r, "request_id", None) or getattr(r, "display_id", None) or f"REQ-{r.id:06d}"
+                eq_name = r.equipment_name or r.equipment_id
+                lines.append(
+                    f"• **{eq_name}** (`{r.equipment_id}`): **{r.quantity}** cái | Dự án: **{r.project or 'N/A'}** | Mã đơn: `{req_id_str}`"
+                )
+            return "\n".join(lines)
 
         status_label = ""
         if plan.status_filter == "Approved":
@@ -1216,10 +1558,18 @@ class AgentOrchestrator:
         elif plan.status_filter == "Rejected":
             status_label = " bị từ chối"
 
+        if plan.status_filter == "Borrowed":
+            summary_header = (
+                f"📋 Hiện tại bạn đang có **{len(requests)} đơn mượn** với **{len(unique_eq_types)} loại thiết bị** khác nhau "
+                f"(tổng cộng **{total_borrowed_qty}** đơn vị/cái) đang trong trạng thái mượn (Borrowed):\n"
+            )
+        else:
+            summary_header = f"📋 **Các yêu cầu mượn thiết bị{status_label} {target_name_display}** ({len(requests)} yêu cầu):\n"
+
         lines = [
-            f"📋 **Các yêu cầu mượn thiết bị{status_label} của bạn** ({len(requests)} yêu cầu):\n",
+            summary_header,
             "| Mã YC | Thiết bị | Dự án | SL | Ngày mượn | Ngày trả | Mức ưu tiên | Trạng thái |",
-            "|---|---|---|---|---|---|---|---|",
+            "| :--- | :--- | :--- | :---: | :---: | :---: | :--- | :--- |",
         ]
         for r in requests[:10]:
             req_id_str = getattr(r, "request_id", None) or getattr(r, "display_id", None) or f"REQ-{r.id:06d}"
@@ -1228,8 +1578,18 @@ class AgentOrchestrator:
             prio = r.final_priority_level or r.priority_level or "Needs review"
             n_from = (r.needed_from or "")[:10]
             n_to = (r.needed_to or "")[:10]
+
+            id_cell = escape_markdown_cell(req_id_str, wrap_code=True)
+            eq_cell = escape_markdown_cell(eq_display)
+            proj_cell = escape_markdown_cell(r.project or "N/A")
+            qty_cell = escape_markdown_cell(r.quantity)
+            from_cell = escape_markdown_cell(n_from)
+            to_cell = escape_markdown_cell(n_to)
+            prio_cell = escape_markdown_cell(prio)
+            status_cell = escape_markdown_cell(r.status)
+
             lines.append(
-                f"| {req_id_str} | {eq_display} | {r.project} | {r.quantity} | {n_from} | {n_to} | {prio} | {r.status} |"
+                f"| {id_cell} | {eq_cell} | {proj_cell} | {qty_cell} | {from_cell} | {to_cell} | {prio_cell} | {status_cell} |"
             )
         return "\n".join(lines)
 
@@ -1240,7 +1600,11 @@ class AgentOrchestrator:
     def _handle_pending_request_count(self, user: SessionData, trace: AgentTrace) -> str:
         trace.selected_tool = "count_pending_requests"
         if not user.is_manager and not user.is_admin:
-            return "Chỉ quản lý (Manager) mới có quyền kiểm tra số lượng đơn chờ duyệt."
+            user_pending = [r for r in self.tools.list_my_requests(user.user_email) if (r.status or "").lower() == "pending"]
+            cnt = len(user_pending)
+            if cnt == 0:
+                return "Hiện bạn không có đơn mượn nào đang chờ duyệt."
+            return f"Hiện bạn đang có **{cnt}** đơn mượn đang chờ quản lý phê duyệt."
 
         counts = self.tools.count_pending_requests(user.user_email)
         total = counts["total_pending"]
@@ -1268,7 +1632,18 @@ class AgentOrchestrator:
     ) -> str:
         trace.selected_tool = "list_pending_requests"
         if not user.is_manager and not user.is_admin:
-            return "Chỉ quản lý (Manager) mới có quyền xem danh sách đơn chờ duyệt."
+            user_pending = [r for r in self.tools.list_my_requests(user.user_email) if (r.status or "").lower() == "pending"]
+            if not user_pending:
+                return "Hiện bạn không có đơn mượn nào đang chờ duyệt."
+            serialized = [_to_dict(r) for r in user_pending]
+            state_manager.set_result_set(state, serialized, result_type="request", page=1, page_size=10)
+            lines = [f"📋 Danh sách **{len(user_pending)}** đơn mượn của bạn đang chờ phê duyệt:\n"]
+            for i, r in enumerate(user_pending[:10], 1):
+                lines.append(
+                    f"{i}. **Đơn #{r.id}** - Thiết bị: `{r.equipment_id}` ({r.equipment_name}) | SL: {r.quantity}\n"
+                    f"   - Dự án: {r.project} | Thời gian: {r.needed_from} đến {r.needed_to} | Trạng thái: **{r.status}**"
+                )
+            return "\n".join(lines)
 
         pending = self.tools.list_pending_requests(user.user_email)
         if not pending:
@@ -1486,11 +1861,56 @@ class AgentOrchestrator:
 
     def _handle_active_loans(
         self,
+        plan: QueryPlan,
+        user: SessionData,
         state: ConversationState,
         trace: AgentTrace,
     ) -> str:
         trace.selected_tool = "get_active_loans"
         loans = self.tools.get_active_loans()
+
+        target_person = plan.entity_name
+        if target_person:
+            searched_name = target_person.lower().strip()
+            user_name_lower = (user.user_name or "").lower().strip()
+            searched_tokens = set(re.findall(r"[A-Za-zÀ-ỹ]+", searched_name))
+            user_tokens = set(re.findall(r"[A-Za-zÀ-ỹ]+", user_name_lower))
+            is_same_user = (
+                searched_name in user_name_lower
+                or user_name_lower in searched_name
+                or (len(searched_tokens & user_tokens) >= 2)
+                or (len(searched_tokens) == 1 and searched_tokens.issubset(user_tokens))
+            )
+
+            if not user.is_manager and not user.is_admin and not is_same_user:
+                return (
+                    f"Bạn chỉ có quyền xem các thiết bị do chính mình mượn. "
+                    f"Để tra cứu thông tin mượn thiết bị của nhân sự khác ({target_person}), bạn cần có quyền Quản lý (Manager)."
+                )
+
+            filtered = []
+            for r in loans:
+                r_name = (r.requester_name or "").lower()
+                r_email = (r.requester_email or "").lower()
+                r_tokens = set(re.findall(r"[A-Za-zÀ-ỹ]+", r_name))
+                if (
+                    searched_name in r_name
+                    or searched_name in r_email
+                    or (searched_tokens and searched_tokens.issubset(r_tokens))
+                    or (len(searched_tokens & r_tokens) >= 2)
+                    or (is_same_user and r_email == user.user_email.lower())
+                ):
+                    filtered.append(r)
+            loans = filtered
+
+            if not loans:
+                return f"Hiện tại không có thiết bị nào đang được {target_person} mượn (Borrowed)."
+
+        elif not user.is_manager and not user.is_admin:
+            loans = [r for r in loans if (r.requester_email or "").lower() == user.user_email.lower()]
+            if not loans:
+                return "Hiện tại bạn không có thiết bị nào đang trong trạng thái mượn (Borrowed)."
+
         serialized = [_to_dict(r) for r in loans]
         state_manager.set_result_set(
             state,
@@ -1505,8 +1925,9 @@ class AgentOrchestrator:
         if not loans:
             return "Hiện tại không có thiết bị nào đang trong trạng thái được mượn (Borrowed)."
 
+        title_prefix = f"đang được {target_person} mượn" if target_person else "đang được mượn"
         lines = [
-            f"📦 Danh sách **{len(loans)}** thiết bị đang được mượn:\n",
+            f"📦 Danh sách **{len(loans)}** thiết bị {title_prefix}:\n",
             "| Mã đơn | Người mượn | Thiết bị | Mã thiết bị | Dự án | Ngày mượn | Ngày trả dự kiến |",
             "|---|---|---|---|---|---|---|",
         ]
@@ -1700,6 +2121,18 @@ class AgentOrchestrator:
             state.active_request = _to_dict(target_loan)
 
             req_id_str = getattr(target_loan, "request_id", None) or getattr(target_loan, "display_id", None) or f"REQ-{target_loan.id:06d}"
+            
+            # Condition note and condition type prefill
+            cond_note = plan.condition_notes or ""
+            ret_cond = "Tốt"
+            if cond_note:
+                if any(k in cond_note.lower() for k in ["hỏng", "trầy", "xước", "vỡ", "lỗi", "cháy", "kém", "hao mòn"]):
+                    ret_cond = "Khác"
+                else:
+                    ret_cond = "Tốt"
+
+            ret_qty = plan.quantity if (plan.quantity and 1 <= plan.quantity <= target_loan.quantity) else target_loan.quantity
+
             action_payload = {
                 "type": "show_return_form",
                 "prefill": {
@@ -1708,15 +2141,28 @@ class AgentOrchestrator:
                     "equipment_id": target_loan.equipment_id,
                     "equipment_name": target_loan.equipment_name,
                     "project": target_loan.project,
-                    "quantity": target_loan.quantity,
+                    "quantity": ret_qty,
                     "needed_from": target_loan.needed_from,
                     "needed_to": target_loan.needed_to,
+                    "return_condition": ret_cond,
+                    "return_condition_note": cond_note,
+                    "condition_notes": cond_note,
                 },
             }
+
+            qty_clarification = ""
+            if target_loan.quantity > 1:
+                qty_clarification = (
+                    f" (Đơn đang mượn {target_loan.quantity} cái. "
+                    f"Biểu mẫu đã mở sẵn {ret_qty} cái, bạn có thể điều chỉnh số lượng hoàn trả nếu trả từng phần)."
+                )
+
+            note_confirm = f"\n- Ghi chú tình trạng ghi nhận: *\"{cond_note}\"*" if cond_note else ""
+
             reply = (
-                f"Bạn đang mượn **{target_loan.equipment_name}** (`{target_loan.equipment_id}`) — "
-                f"{target_loan.quantity} cái, dự án **{target_loan.project}**.\n\n"
-                f"Vui lòng điền thông tin trả bên dưới:"
+                f"Tôi đã mở biểu mẫu trả thiết bị **{target_loan.equipment_name}** (`{target_loan.equipment_id}`) "
+                f"thuộc dự án **{target_loan.project}**{qty_clarification}.{note_confirm}\n\n"
+                f"Vui lòng kiểm tra lại thông tin và xác nhận hoàn trả:"
             )
             return (reply, action_payload)
 

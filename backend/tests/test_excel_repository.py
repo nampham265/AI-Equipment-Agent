@@ -19,8 +19,9 @@ def sample_workbook_path(tmp_path):
     real_path = settings.resolved_excel_path
     assert real_path.exists(), f"Source workbook must exist at {real_path}"
     
-    test_file = tmp_path / "equipment_agent_test.xlsx"
-    shutil.copyfile(real_path, test_file)
+    test_file = tmp_path / "equipment_agent_repo_test.xlsx"
+    if real_path.resolve() != test_file.resolve():
+        shutil.copyfile(real_path, test_file)
     return test_file
 
 

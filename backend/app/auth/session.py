@@ -17,7 +17,7 @@ class SessionData(BaseModel):
 
     user_email: str
     user_name: str
-    user_oid: str
+    user_oid: str = "oid-user"
     role: str = "USER"
     is_active: bool = True
     msal_account_json: str | None = None

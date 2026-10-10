@@ -57,9 +57,9 @@ CATEGORY_REGEX = re.compile(
     re.IGNORECASE,
 )
 
-# Color regexes: đen, trắng, vàng, tím, black, white
+# Color regexes: đen, trắng, vàng, tím, đỏ, black, white, red
 COLOR_REGEX = re.compile(
-    r"\b(màu\s*đen|màu\s*trắng|màu\s*vàng|màu\s*tím|đen|trắng|black|white|yellow|purple)\b",
+    r"\b(màu\s*đen|màu\s*trắng|màu\s*vàng|màu\s*tím|màu\s*đỏ|đen|trắng|black|white|yellow|purple|đỏ|red)\b",
     re.IGNORECASE,
 )
 
@@ -138,7 +138,9 @@ def extract_constraints(text: str) -> ExtractedConstraints:
     m_cat = CATEGORY_REGEX.search(text)
     if m_cat:
         raw_cat = m_cat.group(1).lower()
-        if "connector" in raw_cat or "đầu nối" in raw_cat:
+        if "connector/cable" in text.lower() or ("connector" in text.lower() and "cable" in text.lower()):
+            constraints.category = "Connector/Cable"
+        elif "connector" in raw_cat or "đầu nối" in raw_cat:
             constraints.category = "Connector"
         elif "board" in raw_cat or "mạch" in raw_cat:
             constraints.category = "Board"
@@ -163,6 +165,8 @@ def extract_constraints(text: str) -> ExtractedConstraints:
             constraints.color = "vàng"
         elif "tím" in raw_col or "purple" in raw_col:
             constraints.color = "tím"
+        elif "đỏ" in raw_col or "red" in raw_col:
+            constraints.color = "đỏ"
 
     # Gender
     m_gen = GENDER_REGEX.search(text)
@@ -173,8 +177,11 @@ def extract_constraints(text: str) -> ExtractedConstraints:
         elif any(k in raw_gen for k in ["male", "đực"]):
             constraints.gender = "male"
 
-    # Strip project phrase from text before extracting hardware keywords
+    # Strip project phrase, date ranges, quantities and borrow verbs before extracting hardware keywords
     clean_kw_text = re.sub(r"(?:cho\s+)?(?:project|dự\s*án)\s+[A-Za-z0-9_\-\.]+", "", text, flags=re.IGNORECASE)
+    clean_kw_text = re.sub(r"từ\s+.*?(?:đến|tới|-)\s+[^,.\n]+", "", clean_kw_text, flags=re.IGNORECASE)
+    clean_kw_text = re.sub(r"\b\d+\s*(?:cái|chiếc|bộ|con|pcs|món)?\b", "", clean_kw_text, flags=re.IGNORECASE)
+    clean_kw_text = re.sub(r"\b(?:mượn|cần\s*mượn|muốn\s*mượn|trả|hoàn\s*trả)\b", "", clean_kw_text, flags=re.IGNORECASE)
     raw_tokens = re.findall(r"[A-Za-z0-9_À-ỹ]+", clean_kw_text.lower())
     stop_words = {
         "cho", "mình", "xem", "danh", "sách", "tìm", "kiếm", "các", "có", "ở", "trong",
@@ -185,7 +192,9 @@ def extract_constraints(text: str) -> ExtractedConstraints:
         "chiếc", "bộ", "con", "item", "items", "thì", "khi", "sử", "dụng", "hãy",
         "vui", "lòng", "hộ", "máy", "đồ", "ai", "nào", "chỉ", "thôi", "hỏi", "hãy",
         "món", "thứ", "của", "tôi", "em", "bác", "project", "dự", "án",
-        "sắp", "hết", "ít", "thấp", "cạn",
+        "sắp", "hết", "ít", "thấp", "cạn", "cục", "từ", "đến", "tới", "ngày", "mai",
+        "tuần", "sau", "cuối", "màu", "đỏ", "đen", "trắng", "vàng", "tím", "nếu",
+        "tạo", "lập", "đăng", "ký", "đi",
     }
     keywords = [w for w in raw_tokens if w not in stop_words and len(w) > 1]
     constraints.keywords = keywords
@@ -195,6 +204,22 @@ def extract_constraints(text: str) -> ExtractedConstraints:
 
 class QueryRouter:
     """Deterministic & LLM-assisted Router for Equipment Management intents."""
+
+    @staticmethod
+    def _match_catalog_equipment(text: str) -> Optional[Tuple[str, str]]:
+        """Look for exact equipment names appearing in the natural language text."""
+        try:
+            from app.repositories.factory import get_equipment_repo
+            all_eq = get_equipment_repo().list_all()
+            t_low = text.lower()
+            all_eq_sorted = sorted(all_eq, key=lambda x: len(x.equipment_name), reverse=True)
+            for eq in all_eq_sorted:
+                name_clean = eq.equipment_name.lower().strip()
+                if len(name_clean) >= 4 and name_clean in t_low:
+                    return (eq.equipment_id, eq.equipment_name)
+        except Exception:
+            pass
+        return None
 
     def route_message(self, raw_message: str, state: ConversationState) -> QueryPlan:
         """Parse natural language message into a validated QueryPlan."""
@@ -220,14 +245,22 @@ class QueryRouter:
         plan.target_request_id = extract_request_id(norm_text)
         plan.constraints = extract_constraints(norm_text)
 
+        if not plan.entity_id:
+            cat_match = self._match_catalog_equipment(norm_text)
+            if cat_match:
+                plan.entity_id = cat_match[0]
+                plan.entity_name = cat_match[1]
+
         # Check explicit cancellation when there is an active pending action or user says xem thôi/hủy
-        if any(w in lower_text for w in [
-            "thôi", "hủy", "hủy bỏ", "không mượn nữa", "không trả nữa", "chỉ xem thôi", "mình muốn xem thôi", "xem thôi"
-        ]) and (
-            state.pending_action
-            or state.pending_form
-            or any(w in lower_text for w in ["không mượn", "không trả", "xem thôi", "hủy", "thôi"])
-        ):
+        is_cancel_words = any(w in lower_text for w in [
+            "hủy bỏ", "không mượn nữa", "không trả nữa", "chỉ xem thôi", "mình muốn xem thôi", "xem thôi",
+            "thôi không mượn", "thôi không trả", "thôi không cần", "hủy thao tác", "dừng lại"
+        ]) or lower_text.strip() in ["hủy", "thôi", "cancel", "bỏ", "dừng"]
+
+        if (state.pending_action or state.pending_form) and is_cancel_words:
+            plan.intent = IntentType.CANCEL_ACTION
+            return plan
+        elif is_cancel_words and any(w in lower_text for w in ["không mượn", "không trả", "xem thôi", "hủy thao tác", "hủy bỏ"]):
             plan.intent = IntentType.CANCEL_ACTION
             return plan
 
@@ -377,14 +410,36 @@ class QueryRouter:
             plan.constraints = ExtractedConstraints()
             return plan
 
-        # 3.2.0 Check low-stock inventory report
+        # 3.2.0.1 Check out-of-stock inventory report (strictly Quantity == 0)
+        is_out_of_stock = (
+            "sắp hết" not in lower_text
+            and (
+                any(p in lower_text for p in [
+                    "hết trong kho", "đã hết hàng", "hết hàng", "còn 0 cái", "hết sạch", "hết rồi không",
+                    "thiết bị nào hết", "món nào hết", "đã hết", "hết rồi", "hết chưa", "tồn bằng 0", "số lượng bằng 0"
+                ])
+                or (
+                    any(w in lower_text for w in ["kho", "trong kho", "thiết bị", "món"])
+                    and any(w in lower_text for w in ["hết hàng", "hết rồi", "còn 0 cái", "hết sạch", "nào hết"])
+                )
+            )
+        ) and not plan.entity_id and not any(w in lower_text for w in ["mượn", "borrow", "trả", "return"])
+
+        if is_out_of_stock:
+            plan.intent = IntentType.OUT_OF_STOCK_INVENTORY
+            plan.entity_id = None
+            plan.entity_name = None
+            plan.constraints.keywords = []
+            return plan
+
+        # 3.2.0.2 Check low-stock inventory report
         is_low_stock = (
             any(p in lower_text for p in [
                 "sắp hết", "còn ít", "tồn thấp", "số lượng tồn thấp", "cần bổ sung", "sắp cạn", "tồn kho thấp",
             ])
             or (
                 any(w in lower_text for w in ["kho", "trong kho", "thiết bị", "món"])
-                and any(w in lower_text for w in ["sắp hết", "còn ít", "cần bổ sung", "hết hàng", "sắp cạn"])
+                and any(w in lower_text for w in ["sắp hết", "còn ít", "cần bổ sung", "sắp cạn"])
             )
             or bool(re.search(r"(?:dưới|còn dưới)\s+(\d+)\s*(?:cái|chiếc|món|bộ)?", lower_text))
             or bool(re.search(r"(\d+)\s*(?:cái|chiếc|món|bộ)?\s*trở\s*xuống", lower_text))
@@ -484,6 +539,8 @@ class QueryRouter:
             plan.project = form_data["project"]
         if "purpose" in form_data:
             plan.purpose = form_data["purpose"]
+        if "condition_notes" in form_data:
+            plan.condition_notes = form_data["condition_notes"]
 
         # 6. Intent classification logic
 
@@ -524,7 +581,11 @@ class QueryRouter:
                 "tôi đang mượn những thiết bị nào", "tôi đang mượn thiết bị nào", "mình đang mượn những thiết bị nào",
                 "tôi đang mượn gì", "mình đang mượn gì", "thiết bị tôi đang mượn", "thiết bị mình đang mượn",
                 "xem yêu cầu của tôi", "xem đơn của tôi", "xem đơn mượn của tôi", "cho tôi biết các yêu cầu tôi đã gửi",
-                "tôi đã mượn", "mình đã mượn", "các yêu cầu đã gửi"
+                "tôi đã mượn", "mình đã mượn", "các yêu cầu đã gửi",
+                "hiện mình đang mượn mấy thiết bị", "mình đang mượn mấy thiết bị", "tôi đang mượn mấy thiết bị",
+                "hiện tôi đang mượn mấy thiết bị", "mình mượn mấy thiết bị", "tôi mượn mấy thiết bị",
+                "hiện mình đang mượn", "hiện tôi đang mượn", "mình đang mượn mấy", "tôi đang mượn mấy",
+                "mình đang mượn những gì", "tôi đang mượn những gì", "mình đang mượn", "tôi đang mượn",
             ])
             or (
                 any(w in lower_text for w in ["yêu cầu", "đơn", "request"])
@@ -544,7 +605,7 @@ class QueryRouter:
                 plan.status_filter = "Approved"
             elif any(w in lower_text for w in ["chờ duyệt", "còn chờ", "đang chờ", "chưa duyệt", "pending"]):
                 plan.status_filter = "Pending"
-            elif any(w in lower_text for w in ["đang mượn", "đang giữ", "chưa trả", "borrowed"]):
+            elif any(w in lower_text for w in ["đang mượn", "đang giữ", "chưa trả", "borrowed", "mấy thiết bị"]):
                 plan.status_filter = "Borrowed"
             elif any(w in lower_text for w in ["bị từ chối", "từ chối", "rejected", "bác bỏ"]):
                 plan.status_filter = "Rejected"
@@ -553,32 +614,80 @@ class QueryRouter:
             plan.intent = IntentType.MY_REQUESTS
             return plan
 
+        # 6.3.2 Person refinement follow-up: "Nếu chỉ riêng Nam Phạm thôi thì sao", "riêng Nam Phạm", "chỉ riêng Nam Phạm"
+        m_person = re.search(r"(?:nếu\s+)?(?:chỉ\s+)?riêng\s+([A-Za-zÀ-ỹ\s]+?)(?:\s+thôi)?(?:\s+thì\s+sao)?\??$", lower_text)
+        if m_person and (
+            state.last_result_type in ["user_requests", "active_loans", "active_borrowers"]
+            or state.last_intent in [IntentType.MY_REQUESTS, IntentType.ACTIVE_LOANS, IntentType.ACTIVE_BORROWERS, IntentType.ACTIVE_BORROWERS_COUNT]
+        ):
+            target_person_name = m_person.group(1).strip()
+            plan.intent = IntentType.MY_REQUESTS if state.last_result_type == "user_requests" else IntentType.ACTIVE_LOANS
+            plan.entity_name = target_person_name
+            plan.status_filter = "Borrowed"
+            return plan
+
+        # 6.3.3 List equipment details follow-up: "Những thiết bị đó là gì", "Các thiết bị đó là gì"
+        if any(p in lower_text for p in [
+            "những thiết bị đó là gì", "các thiết bị đó là gì", "thiết bị đó là gì",
+            "gồm những thiết bị nào", "những món đó là gì", "cụ thể là những thiết bị nào"
+        ]) and state.last_result_set:
+            if state.last_result_type in ["user_requests", "borrowed_loans"] or state.last_intent == IntentType.MY_REQUESTS:
+                plan.intent = IntentType.MY_REQUESTS
+                plan.status_filter = "Borrowed"
+                return plan
+            elif state.last_result_type in ["active_loans", "active_borrowers"]:
+                plan.intent = IntentType.ACTIVE_LOANS
+                return plan
+
         # 6.4 Return Request — MUST be before borrow keyword check
-        is_condition_kw = any(p in lower_text for p in [
-            "tình trạng", "hư hỏng", "hỏng hóc", "hỏng không", "thiệt hại", "báo hỏng", "báo cho quản lý", "nếu phát hiện"
+        is_hypothetical_or_capability = any(p in lower_text for p in [
+            "sau khi trả", "nếu phát hiện", "có thể báo cho quản lý", "hệ thống có thể", "có thể báo", "khi phát hiện", "báo cho quản lý không"
         ])
         is_return_kw = (
             any(p in lower_text for p in [
                 "muốn trả đồ", "muốn trả lại", "trả thiết bị", "hoàn trả thiết bị",
                 "trả đồ", "tôi muốn trả", "mình muốn trả", "trả lại thiết bị",
-                "trả lại đồ", "muốn trả", "tôi trả", "mình trả",
+                "trả lại đồ", "muốn trả", "tôi trả", "mình trả", "hoàn trả",
             ])
             and not any(p in lower_text for p in [
                 "trả trễ", "trả muộn", "quá hạn trả", "chậm trả", "trả thiết bị trễ",
+                "khi nào trả", "thời gian trả", "bao giờ trả", "lúc nào trả",
             ])
-            and not is_condition_kw
+            and not is_hypothetical_or_capability
         )
         if is_return_kw:
             plan.intent = IntentType.RETURN_REQUEST
             return plan
 
+        # 6.3.4 Hypothetical follow-up inquiry on equipment sufficiency/availability:
+        # e.g. "Nếu mình cần mượn 30 cái thì sao?", "Nếu chỉ mượn 5 cái thì sao?", "30 cái thì sao?"
+        m_hypo_qty = re.search(r"(?:nếu\s+)?(?:mình\s+|tôi\s+|em\s+)?(?:chỉ\s+)?(?:cần\s+|muốn\s+|lấy\s+)?(?:mượn\s+)?(\d+)\s*(?:cái|chiếc|con|bộ)?(?:\s+thì\s+sao|\s+được\s+không|\s+có\s+đủ\s+không|\s+đủ\s+không|\s+còn\s+dư\s+không)?\??$", lower_text)
+        if m_hypo_qty and (state.active_equipment or state.active_equipment_ids) and any(w in lower_text for w in ["thì sao", "được không", "đủ không", "nếu", "chỉ"]):
+            try:
+                qty_val = int(m_hypo_qty.group(1))
+                if 0 < qty_val < 10000:
+                    plan.quantity = qty_val
+                    active_eq = state.active_equipment or (state.last_selected_item if state.last_result_type == "equipment" else None)
+                    if active_eq:
+                        plan.entity_id = active_eq.get("EquipmentID") or active_eq.get("equipment_id")
+                        plan.entity_name = active_eq.get("EquipmentName") or active_eq.get("equipment_name")
+                    elif state.active_equipment_ids:
+                        plan.entity_id = state.active_equipment_ids[0]
+                    plan.intent = IntentType.AVAILABILITY_QUERY
+                    return plan
+            except (ValueError, IndexError):
+                pass
+
         # 6.4b Approve Request (Manager action)
         is_borrow_kw = (
             any(p in lower_text for p in ["mượn", "tạo đơn", "đăng ký mượn", "cần mượn", "borrow"])
             and not is_my_requests
+            and "thì sao" not in lower_text
             and not any(q in lower_text for q in [
                 "mượn gì", "mượn cái gì", "mượn thiết bị gì", "ai mượn", "ai đang mượn",
-                "yêu cầu của tôi", "đơn của tôi", "của tôi", "của mình", "tôi đang mượn"
+                "yêu cầu của tôi", "đơn của tôi", "của tôi", "của mình", "tôi đang mượn",
+                "đủ không", "có đủ", "còn đủ", "đáp ứng đủ", "ai đang dùng", "ai đang sử dụng",
+                "ai sử dụng", "còn dư", "dư không"
             ])
         )
         is_approve = (
@@ -727,7 +836,19 @@ class QueryRouter:
             return plan
 
         # 6.7 Alternative Search
-        if any(p in lower_text for p in ["thiết bị thay thế", "thay thế cho", "tìm thiết bị thay thế", "tìm thay thế", "loại nào tương tự", "tương đương với", "alternative"]):
+        is_alt_kw = (
+            any(p in lower_text for p in [
+                "thiết bị thay thế", "thay thế cho", "thay thế được cho", "thay thế được", "thay cho",
+                "tìm thiết bị thay thế", "tìm thay thế", "loại nào tương tự", "tương đương với",
+                "tương đương", "alternative", "substitute", "đồ thay thế", "món thay thế", "có gì thay thế"
+            ])
+            or (
+                "thay thế" in lower_text
+                and any(w in lower_text for w in ["thiết bị", "được cho", "thay cho", "cho", "món", "nào", "có gì", "không"])
+            )
+            or ("tương tự" in lower_text and any(w in lower_text for w in ["thiết bị", "loại", "món"]))
+        )
+        if is_alt_kw and not is_borrow_kw:
             plan.intent = IntentType.ALTERNATIVE_SEARCH
             return plan
 
@@ -762,32 +883,40 @@ class QueryRouter:
             plan.intent = IntentType.LIST_USERS
             return plan
 
-        # 6.7 Borrow / Request Create
+        # 6.7 Quantity Sufficiency query: "có đủ không", "đủ không", "còn đủ không", "đáp ứng đủ không", "còn dư không", "có còn dư"
+        if any(p in lower_text for p in [
+            "có đủ không", "đủ không", "còn đủ không", "đáp ứng đủ không", "kho có đủ không", "có đủ", "còn đủ", "dư không"
+        ]):
+            plan.intent = IntentType.QUANTITY_SUFFICIENCY
+            return plan
+
+        # 6.8 Availability query: "có sẵn không", "khả dụng không", "có ai mượn không", "trùng lịch không", "ai sử dụng không", "ai đang sử dụng", "còn dư trong kho"
+        if any(p in lower_text for p in [
+            "có sẵn không", "khả dụng", "có ai mượn", "có ai dùng", "có đang được ai sử dụng", "ai đang sử dụng", "ai sử dụng không", "ai đang dùng",
+            "trùng lịch", "available", "rảnh không", "còn dư trong kho", "còn dư để"
+        ]):
+            plan.intent = IntentType.AVAILABILITY_QUERY
+            return plan
+
+        # 6.9 Equipment Count query: "có bao nhiêu cái", "còn bao nhiêu cái", "số lượng bao nhiêu", "còn mấy cái", "bao nhiêu loại", "mấy loại"
+        if any(p in lower_text for p in [
+            "bao nhiêu cái", "còn bao nhiêu", "có bao nhiêu", "số lượng bao nhiêu", "còn mấy cái", "bao nhiêu chiếc", "bao nhiêu con",
+            "bao nhiêu loại", "mấy loại", "có bao nhiêu loại", "có mấy loại"
+        ]):
+            plan.intent = IntentType.EQUIPMENT_COUNT
+            return plan
+
+        # 6.10 Borrow / Request Create
         # BUT: Check negation first! "Không cần mượn, chỉ hỏi..."
         if is_borrow_kw and not plan.negate_borrow:
             plan.intent = IntentType.REQUEST_CREATE
             return plan
 
-        # 6.8 If user had a pending borrow form, and provides more form fields
+        # 6.11 If user had a pending borrow form, and provides more form fields
         if state.pending_form and (plan.quantity or plan.needed_from or plan.project or plan.purpose):
             if not plan.negate_borrow:
                 plan.intent = IntentType.REQUEST_CREATE
                 return plan
-
-        # 6.9 Quantity Sufficiency query: "có đủ không", "đủ không", "còn đủ không", "đáp ứng đủ không"
-        if any(p in lower_text for p in ["có đủ", "đủ không", "còn đủ", "đáp ứng đủ"]):
-            plan.intent = IntentType.QUANTITY_SUFFICIENCY
-            return plan
-
-        # 6.10 Equipment Count query: "có bao nhiêu cái", "còn bao nhiêu cái", "số lượng bao nhiêu", "còn mấy cái"
-        if any(p in lower_text for p in ["bao nhiêu cái", "còn bao nhiêu", "có bao nhiêu", "số lượng bao nhiêu", "còn mấy cái", "bao nhiêu chiếc", "bao nhiêu con"]):
-            plan.intent = IntentType.EQUIPMENT_COUNT
-            return plan
-
-        # 6.11 Availability query: "có sẵn không", "khả dụng không", "có ai mượn không", "trùng lịch không"
-        if any(p in lower_text for p in ["có sẵn không", "khả dụng", "có ai mượn", "trùng lịch", "available", "rảnh không"]):
-            plan.intent = IntentType.AVAILABILITY_QUERY
-            return plan
 
         # 6.12 Equipment Detail query: "thông tin về", "thông tin của", "có những thông tin gì", "ở đâu", "vị trí nào", "mô tả", "chi tiết", "dùng để làm gì"
         is_detail_kw = any(p in lower_text for p in [

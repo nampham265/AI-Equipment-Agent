@@ -31,3 +31,28 @@ def db_session() -> Session:
     finally:
         session.close()
         Base.metadata.drop_all(bind=engine)
+
+
+ORIGINAL_EXCEL_PATH = settings.resolved_excel_path
+
+
+@pytest.fixture(autouse=True)
+def isolate_excel_data(tmp_path, monkeypatch):
+    """Ensure tests run against an isolated temporary copy of equipment_agent.xlsx."""
+    import shutil
+    if ORIGINAL_EXCEL_PATH.exists():
+        tmp_file = tmp_path / "equipment_agent_test.xlsx"
+        shutil.copyfile(ORIGINAL_EXCEL_PATH, tmp_file)
+        monkeypatch.setattr(settings, "EXCEL_DATA_PATH", str(tmp_file.resolve()))
+
+
+
+@pytest.fixture(autouse=True)
+def clean_app_dependency_overrides():
+    """Ensure app.dependency_overrides is clean and routing mode is reset before and after every test."""
+    from app.main import app
+    app.dependency_overrides.clear()
+    settings.AGENT_ROUTING_MODE = "legacy_only"
+    yield
+    app.dependency_overrides.clear()
+    settings.AGENT_ROUTING_MODE = "legacy_only"

@@ -16,6 +16,28 @@ from app.services.availability_service import AvailabilityService
 from app.services.priority_service import PriorityService
 
 
+def classify_equipment_role(name: str, desc: str = "", category: str = "") -> str:
+    """Classify equipment into a functional role:
+    SENSOR, HOLDER, CONNECTOR, CABLE, CONTROLLER, MATERIAL, TOOL, UNVERIFIED.
+    """
+    text = f"{name} {desc} {category}".lower()
+    if any(k in text for k in ["holder", "giá đỡ", "khung/giá đỡ", "bracket", "mount", "gá", "chân đế"]):
+        return "HOLDER"
+    if any(k in text for k in ["connector", "đầu nối", "giắc", "jack", "terminal", "housing", "plug", "cụm đầu nối"]):
+        return "CONNECTOR"
+    if any(k in text for k in ["cable", "cáp", "dây nối", "wire", "jumper", "harness", "dây"]):
+        return "CABLE"
+    if any(k in text for k in ["sensor", "cảm biến", "wss", "wheelspeed", "hall", "encoder", "áp suất"]):
+        return "SENSOR"
+    if any(k in text for k in ["ecu", "controller", "bộ điều khiển", "vi điều khiển", "module", "can"]):
+        return "CONTROLLER"
+    if any(k in text for k in ["pla", "filament", "nhựa in", "vật tư", "băng dính"]):
+        return "MATERIAL"
+    if any(k in text for k in ["kìm", "tô vít", "absorber", "hút khói", "mỏ hàn", "dụng cụ"]):
+        return "TOOL"
+    return "UNVERIFIED"
+
+
 class AgentTools:
     """Deterministic backend services exposed as typed tools to the Agent."""
 
@@ -134,8 +156,62 @@ class AgentTools:
             "items": matching_items,
         }
 
+    def get_out_of_stock_inventory(self) -> dict[str, Any]:
+        """Retrieve equipment records with recorded stock quantity == 0 (strictly out of stock).
+
+        Returns:
+            dict with condition, total_matches, and items list sorted deterministically.
+        """
+        all_eq = self.equipment_repo.get_all()
+        matching_items: list[dict[str, Any]] = []
+
+        for eq in all_eq:
+            raw_qty = None
+            if hasattr(eq, "quantity_total"):
+                val = getattr(eq, "quantity_total")
+                if val is not None:
+                    raw_qty = val
+            if raw_qty is None and hasattr(eq, "quantity"):
+                val = getattr(eq, "quantity")
+                if val is not None:
+                    raw_qty = val
+
+            if raw_qty is None:
+                continue
+
+            # Ensure valid numeric value
+            if isinstance(raw_qty, (int, float)):
+                qty_val = int(raw_qty)
+            elif isinstance(raw_qty, str) and raw_qty.strip().lstrip("-").isdigit():
+                try:
+                    qty_val = int(raw_qty.strip())
+                except ValueError:
+                    continue
+            else:
+                continue
+
+            # Out of stock strictly means Quantity == 0
+            if qty_val == 0:
+                matching_items.append({
+                    "equipment_id": eq.equipment_id,
+                    "equipment_name": eq.equipment_name,
+                    "recorded_quantity": 0,
+                    "unit": eq.unit or "cái",
+                    "location": eq.location or "Chưa xác định",
+                    "category": eq.category or "Chưa phân loại",
+                })
+
+        # Deterministic sort: tie-break by equipment_id
+        matching_items.sort(key=lambda x: str(x["equipment_id"]))
+
+        return {
+            "condition": "Quantity == 0",
+            "total_matches": len(matching_items),
+            "items": matching_items,
+        }
+
     def get_equipment_count(self, equipment_id: str) -> dict[str, Any]:
-        """Get deterministic quantity information for an equipment."""
+        """Get deterministic quantity information for an equipment, with inventory inconsistency detection."""
         eq = self.equipment_repo.get_by_id(equipment_id.strip().upper())
         if not eq:
             return {"found": False, "equipment_id": equipment_id}
@@ -149,6 +225,12 @@ class AgentTools:
         )
         borrowed_qty = sum(r.quantity for r in overlapping if r.status == "Borrowed")
         approved_qty = sum(r.quantity for r in overlapping if r.status == "Approved")
+        has_inconsistency = borrowed_qty > eq.quantity_total
+        inconsistency_note = (
+            f"⚠️ Cảnh báo bất thường dữ liệu: Số lượng ghi nhận đang mượn ({borrowed_qty}) "
+            f"vượt quá tổng tồn kho ({eq.quantity_total}). Cần thủ kho đối soát lại chứng từ mượn/trả."
+            if has_inconsistency else None
+        )
         available_now = max(0, eq.quantity_total - (borrowed_qty + approved_qty))
 
         return {
@@ -161,6 +243,8 @@ class AgentTools:
             "borrowed_quantity": borrowed_qty,
             "approved_quantity": approved_qty,
             "available_quantity": available_now,
+            "has_inconsistency": has_inconsistency,
+            "inconsistency_note": inconsistency_note,
         }
 
     def check_availability(
@@ -490,7 +574,12 @@ class AgentTools:
         max_results: int = 5,
         limit: Optional[int] = None,
     ) -> dict[str, Any]:
-        """Find alternative/substitute equipment. Target equipment is NEVER included in results."""
+        """Find alternative/substitute equipment.
+        Target equipment is NEVER included in results.
+        Strictly differentiates description similarity from technical compatibility,
+        and distinguishes functional devices from mechanical accessories (holders/connectors).
+        """
+        import re
         effective_limit = limit if limit is not None else max_results
         target_id_clean = (target_equipment_id or "").strip().upper()
         target_obj = self.equipment_repo.get_by_id(target_id_clean) if target_id_clean else None
@@ -499,6 +588,12 @@ class AgentTools:
         all_equipment = self.equipment_repo.get_all()
         candidates = []
 
+        target_name_str = target_obj.equipment_name if target_obj else (target_equipment_name or "")
+        target_desc_str = target_obj.description if target_obj and target_obj.description else ""
+        target_role = classify_equipment_role(target_name_str, target_desc_str, category or "")
+
+        target_is_wss = any(k in f"{target_name_str} {target_desc_str}".lower() for k in ["wheelspeed", "wss", "tốc độ bánh xe", "tốc độ vòng quay", "wheel speed"])
+
         for eq in all_equipment:
             # CRITICAL RULE: Target equipment MUST NEVER appear in its own alternative results
             if target_id_clean and eq.equipment_id.upper() == target_id_clean:
@@ -506,61 +601,129 @@ class AgentTools:
             if target_equipment_name and eq.equipment_name.strip().lower() == target_equipment_name.strip().lower():
                 continue
 
+            eq_name = eq.equipment_name or ""
+            eq_desc = eq.description or ""
+            cand_role = classify_equipment_role(eq_name, eq_desc, eq.category or "")
+            cand_is_wss = any(k in f"{eq_name} {eq_desc}".lower() for k in ["wheelspeed", "wss", "tốc độ bánh xe", "tốc độ vòng quay", "wheel speed"])
+
+            matched_specs: list[str] = []
+            unverified_specs: list[str] = []
+            compatibility_status: str = "UNVERIFIED"
+            suitability_label: str = "Chưa xác minh"
+            technical_note: str = ""
+            is_interchangeable: bool = False
+
+            # Evaluate technical compatibility
+            if target_role == "SENSOR":
+                if cand_role in ["HOLDER", "CONNECTOR", "CABLE"]:
+                    compatibility_status = "ACCESSORY_NOT_SUBSTITUTE"
+                    role_vn = "giá đỡ/gá lắp cơ khí" if cand_role == "HOLDER" else ("đầu nối/giắc cắm" if cand_role == "CONNECTOR" else "dây cáp")
+                    suitability_label = "ACCESSORY_NOT_SUBSTITUTE"
+                    display_label = "Phụ kiện đi kèm — Không thể thay thế cảm biến"
+                    technical_note = f"Đây là {role_vn}, không có chức năng đo lường/cảm biến của thiết bị gốc."
+                    unverified_specs.append(f"Không có chức năng cảm biến ({role_vn})")
+                elif cand_role == "SENSOR":
+                    if target_is_wss and cand_is_wss:
+                        compatibility_status = "POTENTIALLY_SUITABLE"
+                        suitability_label = "POTENTIALLY_SUITABLE"
+                        display_label = "Có thể phù hợp (cần kiểm tra thêm datasheet)"
+                        technical_note = "Cùng chức năng cảm biến tốc độ bánh xe (WSS). Cần đối soát datasheet về air-gap, điện áp hoạt động và dạng xung tín hiệu."
+                        is_interchangeable = True
+                        matched_specs.append("Cùng chức năng đo tốc độ bánh xe (Wheel Speed Sensor)")
+                        unverified_specs.extend([
+                            "Khoảng cách đọc air-gap",
+                            "Điện áp hoạt động (Operating Voltage)",
+                            "Dạng xung tín hiệu (Signal Protocol/Output)",
+                        ])
+                    else:
+                        compatibility_status = "UNVERIFIED"
+                        suitability_label = "SAME_CATEGORY"
+                        display_label = "Chưa xác minh (Khác phân loại cảm biến)"
+                        technical_note = "Cùng phân loại cảm biến nhưng đo lường đại lượng khác nhau hoặc khác mục đích kỹ thuật. Không tương thích."
+                        unverified_specs.append("Khác đại lượng đo lường / thông số kỹ thuật")
+                else:
+                    compatibility_status = "INCOMPATIBLE"
+                    suitability_label = "DIFFERENT_FORM_FACTOR"
+                    display_label = "Không tương thích"
+                    technical_note = "Khác nhóm chức năng kỹ thuật."
+            else:
+                if cand_role == target_role and target_role != "UNVERIFIED":
+                    compatibility_status = "POTENTIALLY_SUITABLE"
+                    suitability_label = "POTENTIALLY_SUITABLE"
+                    display_label = "Có thể phù hợp (cùng nhóm chức năng)"
+                    technical_note = f"Cùng nhóm thiết bị {target_role}. Cần kiểm tra thông số chi tiết."
+                    is_interchangeable = True
+                else:
+                    compatibility_status = "UNVERIFIED"
+                    suitability_label = "SAME_CATEGORY" if (category and (eq.category or "").lower() == category.lower()) else "DIFFERENT_FORM_FACTOR"
+                    display_label = "Chưa xác minh"
+                    technical_note = "Khác nhóm thiết bị hoặc chưa đủ dữ liệu kỹ thuật đối soát."
+
+            # Calculate grounded text similarity score (0 - 100)
             score = 0
-            match_points = []
             if category and (eq.category or "").lower() == category.lower():
-                score += 4
-                match_points.append(f"Cùng nhóm: {eq.category}")
-            if constraints:
-                if constraints.location and constraints.location.lower() in (eq.location or "").lower():
-                    score += 2
-                    match_points.append(f"Cùng vị trí: {eq.location}")
-                if constraints.size_mm and f"{constraints.size_mm}mm" in (eq.description or ""):
-                    score += 3
-                    match_points.append(f"Kích thước khớp: {constraints.size_mm}mm")
-                if constraints.geometry and constraints.geometry.lower() in (eq.description or "").lower():
-                    score += 3
-                    match_points.append(f"Kiểu dáng khớp: {constraints.geometry}")
-                if constraints.pins and f"{constraints.pins}pos" in (eq.description or "").lower():
-                    score += 3
-                    match_points.append(f"Số chân khớp: {constraints.pins} pin")
+                score += 15
+                matched_specs.append(f"Cùng nhóm: {eq.category}")
 
             if target_obj and target_obj.description and eq.description:
-                target_words = set(target_obj.description.lower().split())
-                eq_words = set(eq.description.lower().split())
-                common = (target_words & eq_words) - {"và", "với", "cho", "loại", "cái", "mm", "khoảng", "tủ"}
-                if len(common) >= 2:
-                    score += min(len(common), 4)
-                    match_points.append(f"Đặc tính kỹ thuật tương đồng ({len(common)} thông số)")
+                target_words = set(re.findall(r"\w+", target_obj.description.lower()))
+                eq_words = set(re.findall(r"\w+", eq.description.lower()))
+                stop_words = {"và", "với", "cho", "loại", "cái", "mm", "khoảng", "tủ", "các", "khi", "để", "được", "có", "trên", "từ", "về"}
+                common = (target_words & eq_words) - stop_words
+                common_count = len(common)
+                if common_count >= 1:
+                    score += min(common_count * 5, 30)
 
-            if score > 0 or (not target_obj and not category):
+            if is_interchangeable:
+                score += 35  # Major boost for functional role match
+            elif compatibility_status == "ACCESSORY_NOT_SUBSTITUTE":
+                score = min(score, 35)  # Cap accessory score so it never claims high equivalence
+            elif compatibility_status == "INCOMPATIBLE":
+                score = min(score, 15)
+
+            # Only include relevant items (same category or related keywords or functional relevance)
+            if score >= 15 or cand_is_wss or (category and (eq.category or "").lower() == category.lower()):
                 candidates.append({
                     "equipment": eq,
-                    "score": score,
-                    "match_reasons": match_points,
-                    "equivalence_status": "POTENTIALLY_SUITABLE",
+                    "score": min(score, 100),
+                    "compatibility_status": compatibility_status,
+                    "suitability_label": suitability_label,
+                    "display_label": display_label,
+                    "technical_note": technical_note,
+                    "matched_specs": matched_specs,
+                    "unverified_specs": unverified_specs,
+                    "is_interchangeable": is_interchangeable,
                 })
 
-        candidates.sort(key=lambda x: x["score"], reverse=True)
+        # Deterministic sorting: interchangeable items FIRST, then descending by score, tie-break equipment_id
+        candidates.sort(key=lambda x: (1 if x["is_interchangeable"] else 0, x["score"], str(x["equipment"].equipment_id)), reverse=True)
         top_candidates = candidates[:effective_limit]
+
         return {
             "success": True,
             "target_equipment_id": target_id_clean,
             "target_equipment_name": target_obj.equipment_name if target_obj else target_equipment_name,
             "target_name": target_obj.equipment_name if target_obj else (target_equipment_name or target_id_clean),
+            "target_role": target_role,
             "has_official_equivalence": False,
-            "official_equivalence_notice": "Kho hiện chưa có danh mục quy chuẩn tương đương chính thức. Các gợi ý dưới đây dựa trên đối soát thuộc tính kỹ thuật tương đồng.",
+            "official_equivalence_notice": "Kho hiện chưa có danh mục quy chuẩn tương đương chính thức 1-1. Đề xuất dưới đây dựa trên phân loại chức năng kỹ thuật và đối soát thuộc tính.",
             "alternatives": [
                 {
                     "equipment": c["equipment"],
-                    "suitability_label": c["equivalence_status"],
-                    "score": c["score"] * 10,
-                    "match_reasons": c["match_reasons"],
+                    "suitability_label": c["suitability_label"],
+                    "display_label": c.get("display_label") or c["suitability_label"],
+                    "compatibility_status": c["compatibility_status"],
+                    "score": c["score"],
+                    "technical_note": c["technical_note"],
+                    "matched_specs": c["matched_specs"],
+                    "unverified_specs": c["unverified_specs"],
+                    "is_interchangeable": c["is_interchangeable"],
                 }
                 for c in top_candidates
             ],
             "candidates": top_candidates,
         }
+
 
     def external_sourcing_search(
         self,

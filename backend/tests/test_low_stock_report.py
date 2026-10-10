@@ -42,6 +42,12 @@ class DummyEquipment:
         self.category = category
 
 
+@pytest.fixture(autouse=True)
+def clean_dependency_overrides():
+    yield
+    app.dependency_overrides.clear()
+
+
 @pytest.fixture
 def auth_user():
     return SessionData(

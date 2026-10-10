@@ -7,9 +7,9 @@ from datetime import date, datetime, timedelta
 from typing import Optional, Tuple
 
 
-# Regex patterns for equipment IDs like TU1-001, EBS-030, CSW-001, DEMO-EQ-001
+# Regex patterns for equipment IDs like TU1-001, TU2-007, EBS-030, CSW-001, DEMO-EQ-001
 EQUIPMENT_ID_PATTERN = re.compile(
-    r"\b(TU1|EBS|CSW|DEMO-EQ)[ _-]?([0-9]{2,4})\b",
+    r"\b(TU[0-9]|EBS|CSW|DEMO-EQ)[ _-]?([0-9]{2,4})\b",
     re.IGNORECASE,
 )
 
@@ -224,48 +224,92 @@ def parse_dates_vietnamese(text: str) -> Tuple[Optional[str], Optional[str]]:
     - 'từ 10/10 đến 12/10'
     - 'từ ngày 10/10/2026 đến 12/10/2026'
     - '10/10 - 12/10'
-    - 'từ ngày mai đến thứ 6'
+    - 'từ thứ 2 tuần sau đến cuối tuần sau'
+    - 'từ ngày mai đến thứ 6 tuần sau'
     """
     today = date.today()
     current_year = today.year
-    
+    dow_map = {
+        "2": 0, "hai": 0,
+        "3": 1, "ba": 1,
+        "4": 2, "tư": 2, "bốn": 2,
+        "5": 3, "năm": 3,
+        "6": 4, "sáu": 4,
+        "7": 5, "bảy": 5,
+        "chủ nhật": 6, "cn": 6,
+    }
+
     def _parse_part(d_str: str) -> Optional[date]:
-        d_str = d_str.strip()
-        if "hôm nay" in d_str.lower():
+        s = d_str.strip().lower()
+        if "hôm nay" in s:
             return today
-        if "ngày mai" in d_str.lower():
+        if "ngày mai" in s:
             return today + timedelta(days=1)
-        if "ngày kia" in d_str.lower():
+        if "ngày kia" in s:
             return today + timedelta(days=2)
-            
-        m = re.search(r"(\d{1,2})[/-](\d{1,2})(?:[/-](\d{2,4}))?", d_str)
-        if m:
-            day = int(m.group(1))
-            month = int(m.group(2))
-            year = int(m.group(3)) if m.group(3) else current_year
+
+        # 1. Explicit calendar date: DD/MM/YYYY or DD/MM
+        m_dt = re.search(r"(\d{1,2})[/-](\d{1,2})(?:[/-](\d{2,4}))?", s)
+        if m_dt:
+            day = int(m_dt.group(1))
+            month = int(m_dt.group(2))
+            year = int(m_dt.group(3)) if m_dt.group(3) else current_year
             if year < 100:
                 year += 2000
             try:
                 return date(year, month, day)
             except ValueError:
                 return None
+
+        # 2. Weekday and relative week expressions
+        is_next_week = any(w in s for w in ["tuần sau", "tuần tới", "kế tiếp"])
+        if any(w in s for w in ["cuối tuần sau", "cuối tuần tới"]):
+            # System convention: Sunday of next week
+            return today + timedelta(days=13 - today.weekday())
+        if "cuối tuần" in s:
+            # System convention: Sunday of current week
+            return today + timedelta(days=6 - today.weekday())
+
+        m_dow = re.search(r"\b(?:thứ\s*)?(2|3|4|5|6|7|hai|ba|tư|bốn|năm|sáu|bảy|chủ\s*nhật|cn)\b", s)
+        if m_dow:
+            dow_key = m_dow.group(1).replace(" ", "")
+            if dow_key in dow_map:
+                target_dow = dow_map[dow_key]
+                if is_next_week:
+                    next_mon = today + timedelta(days=7 - today.weekday())
+                    return next_mon + timedelta(days=target_dow)
+                else:
+                    this_mon = today - timedelta(days=today.weekday())
+                    cand = this_mon + timedelta(days=target_dow)
+                    if cand < today:
+                        cand += timedelta(days=7)
+                    return cand
+
         return None
 
-    # Pattern: từ X đến Y
-    m_range = re.search(r"từ\s+([^đến\-]+)\s+(?:đến|tới|-)\s+([^,\.\n]+)", text, re.IGNORECASE)
+    # Pattern 1: từ X đến/tới/- Y
+    m_range = re.search(r"từ\s+(.+?)\s+(?:đến|tới|-)\s+([^,.\n]+)", text, re.IGNORECASE)
     if m_range:
+        # Avoid capturing trailing project or purpose phrases in d_to
+        part_to = m_range.group(2)
+        part_to = re.sub(r"(?:cho\s+)?(?:project|dự\s*án).*$", "", part_to, flags=re.IGNORECASE).strip()
         d_from = _parse_part(m_range.group(1))
-        d_to = _parse_part(m_range.group(2))
-        return (d_from.isoformat() if d_from else None, d_to.isoformat() if d_to else None)
+        d_to = _parse_part(part_to)
+        if d_from and d_to:
+            if d_to < d_from:
+                d_to = d_from
+            return (d_from.isoformat(), d_to.isoformat())
+        if d_from:
+            return (d_from.isoformat(), None)
 
-    # Pattern: X - Y (where both look like dates)
+    # Pattern 2: X - Y (explicit dates)
     m_dash = re.search(r"(\d{1,2}[/-]\d{1,2}(?:[/-]\d{2,4})?)\s*[-–]\s*(\d{1,2}[/-]\d{1,2}(?:[/-]\d{2,4})?)", text)
     if m_dash:
         d_from = _parse_part(m_dash.group(1))
         d_to = _parse_part(m_dash.group(2))
         return (d_from.isoformat() if d_from else None, d_to.isoformat() if d_to else None)
 
-    # Single date
+    # Pattern 3: Single date
     m_single = re.search(r"(?:ngày|từ ngày)\s*(\d{1,2}[/-]\d{1,2}(?:[/-]\d{2,4})?)", text, re.IGNORECASE)
     if m_single:
         d_from = _parse_part(m_single.group(1))
@@ -274,9 +318,27 @@ def parse_dates_vietnamese(text: str) -> Tuple[Optional[str], Optional[str]]:
     return (None, None)
 
 
+def extract_condition_notes(text: str) -> Optional[str]:
+    """Extract equipment condition notes from return requests.
+    Example: 'thiết bị còn hoạt động tốt và không bị trầy xước'
+    """
+    m = re.search(
+        r"(?:(?:thiết\s*bị|máy|đồ)?\s*còn\s+[^,.\n]+|hoạt\s*động\s+[^,.\n]+|tình\s*trạng\s*[^,.\n]+)",
+        text,
+        re.IGNORECASE,
+    )
+    if m:
+        c = m.group(0).strip()
+        # Clean leading words if captured
+        clean = re.sub(r"^(?:mình|tôi|em)?\s*(?:muốn|cần)?\s*trả\s*(?:thiết\s*bị\s*)?(?:đơn\s*(?:số|#)?\s*\d+\s*)?[,:-]?\s*", "", c, flags=re.IGNORECASE).strip()
+        if len(clean) >= 4 and any(w in clean.lower() for w in ["tốt", "bình thường", "trầy", "xước", "hỏng", "mới", "hoạt động"]):
+            return clean
+    return None
+
+
 def extract_borrow_fields(text: str) -> dict:
     """Extract potential request fields from user message:
-    quantity, dates, project, purpose.
+    quantity, dates, project, purpose, condition_notes.
     """
     fields: dict = {}
     
@@ -287,12 +349,19 @@ def extract_borrow_fields(text: str) -> dict:
     if d_to:
         fields["needed_to"] = d_to
 
-    # 2. Quantity
-    # Look for "5 cái", "số lượng 5", "5 chiếc", "mượn 5", or standalone number near beginning
-    m_qty = re.search(r"\b(\d+)\s*(?:cái|chiếc|bộ|con|pcs|item)?\b", text, re.IGNORECASE)
-    # Be careful not to match date numbers or equipment numbers (e.g. TU1-001)
-    # Remove dates and equipment IDs before checking quantity
-    text_no_ids = EQUIPMENT_ID_PATTERN.sub("", text)
+    # 2. Condition notes (for return flow)
+    cond = extract_condition_notes(text)
+    if cond:
+        fields["condition_notes"] = cond
+
+    # 3. Clean string for quantity extraction: strip dates, project, condition, IDs
+    text_clean = text
+    if d_from and d_to:
+        text_clean = re.sub(r"từ\s+.*?đến\s+[^,.\n]+", "", text_clean, flags=re.IGNORECASE)
+    text_clean = re.sub(r"(?:cho\s+)?(?:project|dự\s*án)\s+[A-Za-z0-9_\-\.]+", "", text_clean, flags=re.IGNORECASE)
+    if cond:
+        text_clean = text_clean.replace(cond, "")
+    text_no_ids = EQUIPMENT_ID_PATTERN.sub("", text_clean)
     text_no_dates = re.sub(r"\d{1,2}[/-]\d{1,2}(?:[/-]\d{2,4})?", "", text_no_ids)
     
     # Match quantity patterns
@@ -300,23 +369,22 @@ def extract_borrow_fields(text: str) -> dict:
     if m_qty_explicit:
         fields["quantity"] = int(m_qty_explicit.group(1))
     else:
-        # Check for standalone count like "5 cái"
         m_qty_unit = re.search(r"\b(\d+)\s*(?:cái|chiếc|bộ|con|pcs)\b", text_no_dates, re.IGNORECASE)
         if m_qty_unit:
             fields["quantity"] = int(m_qty_unit.group(1))
 
-    # 3. Project: "cho project ABC", "dự án ABC", "project ABC"
+    # 4. Project: "cho project ABC", "dự án ABC", "project ABC"
     m_proj = re.search(r"(?:cho\s+)?(?:project|dự\s*án)\s+([A-Za-z0-9_\-\.]+)", text, re.IGNORECASE)
     if m_proj:
         fields["project"] = m_proj.group(1).strip()
 
-    # 4. Purpose: "để test board", "mục đích là test", "để làm..."
+    # 5. Purpose: "để test board", "mục đích là test", "để làm..."
     m_purp = re.search(r"(?:để|mục\s*đích\s*(?:là)?)\s+([^,\.\n]+)", text, re.IGNORECASE)
     if m_purp:
-        # Avoid including project if captured together
-        purp_str = m_proj_stripped = m_purp.group(1).strip()
+        purp_str = m_purp.group(1).strip()
         purp_str = re.sub(r"(?:cho\s+)?(?:project|dự\s*án)\s+[A-Za-z0-9_\-\.]+", "", purp_str, flags=re.IGNORECASE).strip()
         if purp_str:
             fields["purpose"] = purp_str
 
     return fields
+

@@ -26,6 +26,7 @@ class IntentType(str, Enum):
     ALTERNATIVE_SEARCH = "alternative_search"
     EXTERNAL_SOURCING = "external_sourcing"
     LOW_STOCK_INVENTORY = "low_stock_inventory"
+    OUT_OF_STOCK_INVENTORY = "out_of_stock_inventory"
     
     # Request intents
     REQUEST_CREATE = "request_create"
@@ -141,6 +142,7 @@ class QueryPlan(BaseModel):
     needed_to: Optional[str] = None
     project: Optional[str] = None
     purpose: Optional[str] = None
+    condition_notes: Optional[str] = None
     
     # Request query filter (e.g. "Approved", "Pending", "Borrowed")
     status_filter: Optional[str] = None
@@ -167,6 +169,7 @@ class PendingForm(BaseModel):
     needed_to: Optional[str] = None
     project: str = ""
     purpose: str = ""
+    condition_notes: Optional[str] = None
 
 
 class ConversationState(BaseModel):

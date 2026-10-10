@@ -31,9 +31,10 @@ Allowed intents (choose exactly one matching the user's primary goal):
 - alternative_search: user asks for replacement, substitute, similar alternative equipment (e.g. "loại nào tương tự", "thiết bị thay thế", "hết rồi có loại nào khác").
 - external_sourcing: user explicitly asks where to buy/purchase, external shops, pricing options outside the warehouse (e.g. "tìm nơi bán", "mua ở đâu", "shop nào có").
 - low_stock_inventory: user asks for equipment with low stock, nearly depleted inventory, or needing replenishment (e.g. "thiết bị nào sắp hết", "món nào còn ít", "dưới 5 cái", "số lượng tồn thấp", "cần bổ sung", "có món nào sắp hết không").
+- out_of_stock_inventory: user asks for equipment that is completely out of stock or has 0 units remaining (e.g. "hết trong kho", "hết hàng", "đã hết hàng", "còn 0 cái", "món nào hết sạch không").
 - request_create: user wants to borrow equipment or initiate a borrow request.
 - return_request: user wants to return borrowed equipment.
-- my_requests: user asks to view/check the status of their own borrow requests.
+- my_requests: user asks to view/check their own borrow requests or what equipment they are personally borrowing (e.g. "hiện mình đang mượn mấy thiết bị", "mình đang mượn những gì", "yêu cầu của tôi").
 - active_loans: user/manager asks for all currently borrowed items.
 - active_borrowers: user/manager asks for the list or identities of people currently borrowing.
 - active_borrowers_count: user asks how many people are currently borrowing equipment.
@@ -67,7 +68,8 @@ CRITICAL RULES FOR EXTRACTION:
    - "cái thứ 2", "món thứ 1" -> reference.ordinal_index = 2 (or 1), reference.type = "previous_result".
    - "những người đó là ai" -> reference.is_group_reference = true, reference.type = "group_people".
    - "những người nào bị xung đột" -> reference.is_group_reference = true, reference.type = "group_people".
-6. Low-Stock Inventory Requests:
+6. Low-Stock vs Out-Of-Stock Inventory Requests:
+   - "hết trong kho", "hết hàng", "đã hết hàng", "còn 0 cái" -> intent = "out_of_stock_inventory".
    - If user asks about equipment running low, nearly depleted, or needing replenishment:
      - intent = "low_stock_inventory"
      - Do NOT extract "sắp hết", "còn ít", "bổ sung", "tồn thấp" as equipment_name or keywords.
@@ -76,6 +78,11 @@ CRITICAL RULES FOR EXTRACTION:
        - "5 cái trở xuống", "không quá 5 cái" -> low_stock_threshold = 5, low_stock_operator = "<="
      - If no numeric threshold is stated (e.g. "thiết bị nào sắp hết", "còn ít", "cần bổ sung"):
        - low_stock_threshold = null, low_stock_operator = null
+7. Personal Loans vs Global Warehouse Loans:
+   - "mình đang mượn...", "tôi đang mượn...", "hiện mình đang mượn mấy thiết bị" -> intent = "my_requests". NEVER route first-person personal loan questions to active_loans.
+8. Sufficiency & Availability Inquiry vs Borrow Creation:
+   - "kho có đủ không", "còn đủ không", "đáp ứng đủ không" -> intent = "quantity_sufficiency".
+   - "có đang được ai sử dụng không", "có ai dùng không", "còn dư trong kho để mượn không" -> intent = "availability_query".
 
 Return JSON matching this exact structure:
 {

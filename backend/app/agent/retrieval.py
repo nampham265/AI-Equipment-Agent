@@ -30,8 +30,23 @@ class HybridRetrievalService:
 
         all_items = self.equipment_repo.list_all()
 
-        # If general catalog browsing (no constraints or keywords), preserve natural order
-        is_general = not (
+        # Determine whether this is a general warehouse catalog browsing request
+        is_general = False
+        if query_text:
+            q_clean = query_text.strip().lower()
+            general_phrases = [
+                "những món gì", "những thiết bị gì", "các món gì", "các thiết bị gì",
+                "loại thiết bị nào", "danh sách thiết bị", "kho đang có gì", "trong kho có gì",
+                "kho hiện có gì", "tất cả thiết bị", "toàn bộ thiết bị", "kho có gì",
+            ]
+            is_general = any(p in q_clean for p in general_phrases) and not any(
+                w in q_clean for w in [
+                    "connector", "cable", "abs", "sensor", "board", "cáp", "cảm biến",
+                    "mạch", "dây", "công tắc", "switch", "relay", "rơ le", "caninterface",
+                    "jumper", "header", "rcpt", "hsg", "lemo", "orico", "hub", "cos"
+                ]
+            )
+        elif not (
             constraints.location
             or constraints.category
             or constraints.geometry
@@ -40,19 +55,46 @@ class HybridRetrievalService:
             or constraints.color
             or constraints.gender
             or constraints.keywords
-        )
+        ):
+            is_general = True
+
         if is_general:
             return all_items
+
+        # Build effective constraints from query_text tokens if keywords are empty
+        effective_constraints = constraints
+        if query_text and not constraints.keywords:
+            stop_words = {
+                "mình", "tôi", "em", "muốn", "cần", "tìm", "xem", "cho", "xin",
+                "trong", "kho", "có", "không", "những", "các", "cái", "chiếc", "cục",
+                "bộ", "món", "hiện", "tại", "đang", "được", "là", "gì", "ở", "nào",
+                "để", "thì", "với", "và", "ạ", "nhỉ", "hỏi", "biết"
+            }
+            tokens = [
+                w for w in re.findall(r"[A-Za-z0-9_\-\./]+", query_text.lower())
+                if w not in stop_words and len(w) >= 2
+            ]
+            if tokens:
+                effective_constraints = ExtractedConstraints(
+                    category=constraints.category,
+                    location=constraints.location,
+                    geometry=constraints.geometry,
+                    size_mm=constraints.size_mm,
+                    pins=constraints.pins,
+                    color=constraints.color,
+                    gender=constraints.gender,
+                    keywords=tokens,
+                )
 
         scored_candidates: list[tuple[float, EquipmentRead]] = []
 
         for item in all_items:
             # Check hard constraints
-            if not self._matches_constraints(item, constraints):
+            if not self._matches_constraints(item, effective_constraints):
                 continue
 
             # Calculate score
-            score = self._calculate_score(item, constraints, query_text)
+            score = self._calculate_score(item, effective_constraints, query_text)
             # Relevance threshold: must have positive score >= 15.0 when filtering
             if score >= 15.0:
                 scored_candidates.append((score, item))
@@ -63,7 +105,7 @@ class HybridRetrievalService:
 
     def _matches_constraints(self, item: EquipmentRead, c: ExtractedConstraints) -> bool:
         """Verify hard filters: location, geometry, size_mm, pins, category, color, gender."""
-        full_text = f"{item.equipment_id} {item.equipment_name} {item.description or ''} {item.location or ''}".lower()
+        full_text = f"{item.equipment_id} {item.equipment_name} {item.category or ''} {item.description or ''} {item.location or ''}".lower()
 
         # Location filter
         if c.location:
@@ -86,11 +128,10 @@ class HybridRetrievalService:
             item_cat = (item.category or "").lower()
             item_desc = (item.description or "").lower()
             item_name = (item.equipment_name or "").lower()
-            target_cat = c.category.lower()
-            if (
-                target_cat not in item_cat
-                and target_cat not in item_name
-                and target_cat not in item_desc
+            target_cats = [tc.strip().lower() for tc in c.category.split("/") if tc.strip()]
+            if not any(
+                tc in item_cat or tc in item_name or tc in item_desc
+                for tc in target_cats
             ):
                 return False
 
@@ -138,6 +179,9 @@ class HybridRetrievalService:
             elif col in ["tím", "purple"]:
                 if not any(k in full_text for k in ["tím", "purple"]):
                     return False
+            elif col in ["đỏ", "red"]:
+                if not any(k in full_text for k in ["đỏ", "red"]):
+                    return False
             elif col not in full_text:
                 return False
 
@@ -154,11 +198,25 @@ class HybridRetrievalService:
         # If user specified specific search keywords, candidate MUST match distinctive keywords
         if c.keywords:
             c_kws_lower = [k.lower() for k in c.keywords]
-            if "interface" in c_kws_lower and "interface" not in full_text:
+            primary_text = f"{item.equipment_id} {item.equipment_name} {item.category or ''}".lower()
+
+            if "interface" in c_kws_lower and not re.search(r"\binterface\b", full_text):
                 return False
-            if "banana" in c_kws_lower and "banana" not in full_text:
+            if "banana" in c_kws_lower and not re.search(r"\bbanana\b", full_text):
                 return False
-            matched_kw_count = sum(1 for kw in c_kws_lower if kw in full_text)
+
+            # Specific rule for ABS: must be in primary_text (ECU ABS, Connector ABS), not incidental description mention
+            if "abs" in c_kws_lower and not re.search(r"\babs\b", primary_text):
+                return False
+
+            # If searching for banana jumper, must match banana in primary_text
+            if "banana" in c_kws_lower and "jumper" in c_kws_lower and not re.search(r"\bbanana\b", primary_text):
+                return False
+
+            matched_kw_count = 0
+            for kw in c_kws_lower:
+                if re.search(rf"\b{re.escape(kw)}\b", full_text):
+                    matched_kw_count += 1
             if matched_kw_count == 0:
                 return False
 
@@ -173,20 +231,26 @@ class HybridRetrievalService:
         """Calculate lexical and constraint relevance score."""
         score = 15.0  # Base score for passing hard filters
 
-        full_text = f"{item.equipment_id} {item.equipment_name} {item.description or ''} {item.location or ''}".lower()
+        full_text = f"{item.equipment_id} {item.equipment_name} {item.category or ''} {item.description or ''} {item.location or ''}".lower()
+        primary_text = f"{item.equipment_id} {item.equipment_name} {item.category or ''}".lower()
+        desc_text = (item.description or "").lower()
 
-        # Bonus for keywords
+        # Bonus for keywords matching primary text vs description
         if c.keywords:
             c_kws_lower = [k.lower() for k in c.keywords]
-            matched_kws = [kw for kw in c_kws_lower if kw in full_text]
-            score += len(matched_kws) * 15.0
-            # Extra bonus if ALL keywords match
-            if len(matched_kws) == len(c.keywords) and len(c.keywords) > 1:
-                score += 40.0
-            # Phrase bonus (e.g. "interface board" or "banana jumper")
-            phrase = " ".join(c_kws_lower)
-            if phrase in full_text:
+            matched_primary = [kw for kw in c_kws_lower if re.search(rf"\b{re.escape(kw)}\b", primary_text)]
+            matched_desc = [kw for kw in c_kws_lower if re.search(rf"\b{re.escape(kw)}\b", desc_text)]
+
+            score += len(matched_primary) * 35.0 + len(matched_desc) * 5.0
+            # Extra bonus if ALL keywords match in primary text
+            if len(matched_primary) == len(c_kws_lower) and len(c_kws_lower) > 0:
                 score += 50.0
+            # Phrase bonus
+            phrase = " ".join(c_kws_lower)
+            if phrase in primary_text:
+                score += 60.0
+            elif phrase in full_text:
+                score += 20.0
 
         if query_text:
             q_clean = query_text.lower().strip()
