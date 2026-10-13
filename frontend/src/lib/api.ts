@@ -244,12 +244,20 @@ export function extractErrorMessage(error: unknown): string {
   if (axios.isAxiosError(error)) {
     const data = error.response?.data
     if (typeof data === 'object' && data !== null) {
-      if (typeof data.detail === 'string') return data.detail
+      if (typeof data.detail === 'string' && data.detail.trim() && data.detail !== 'Internal Server Error') {
+        return data.detail
+      }
       if (Array.isArray(data.detail)) {
         return data.detail.map((d: { msg?: string }) => d.msg ?? String(d)).join('; ')
       }
     }
-    return error.message
+    if (error.response?.status === 500) {
+      return 'Hệ thống máy chủ tạm thời không thể lưu dữ liệu (Lỗi 500). Nếu bạn đang mở tệp Excel dữ liệu trên máy tính, vui lòng lưu và đóng tệp Excel rồi thử lại.'
+    }
+    if (error.response?.status === 423) {
+      return 'Tệp dữ liệu Excel hiện đang bị khóa bởi ứng dụng khác (ví dụ: Microsoft Excel). Vui lòng lưu và đóng tệp Excel rồi thử lại.'
+    }
+    return error.message || 'Đã xảy ra lỗi khi gửi yêu cầu.'
   }
   return 'Đã xảy ra lỗi không xác định.'
 }

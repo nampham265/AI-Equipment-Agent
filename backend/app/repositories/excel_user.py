@@ -78,6 +78,7 @@ class ExcelUserRepository:
 
     def _safe_save(self, wb: openpyxl.Workbook) -> None:
         import time
+        from app.repositories.excel_request import ExcelFileLockedError
         tmp_path = self._path.with_suffix(".tmp")
         try:
             wb.save(tmp_path)
@@ -88,15 +89,25 @@ class ExcelUserRepository:
                 pass
 
         last_err = None
-        for attempt in range(5):
+        for attempt in range(8):
             try:
                 os.replace(tmp_path, self._path)
                 return
-            except PermissionError as pe:
+            except (PermissionError, OSError) as pe:
                 last_err = pe
-                time.sleep(0.05 * (attempt + 1))
+                time.sleep(0.1 * (attempt + 1))
+
+        if tmp_path.exists():
+            try:
+                tmp_path.unlink()
+            except Exception:
+                pass
+
         if last_err:
-            raise last_err
+            raise ExcelFileLockedError(
+                f"Tệp dữ liệu Excel '{self._path.name}' hiện đang bị khóa hoặc được mở bởi ứng dụng khác (ví dụ: Microsoft Excel). "
+                "Vui lòng lưu và đóng file Excel trên máy tính rồi thử lại."
+            ) from last_err
 
     def create_user(self, user_in) -> ExcelUserModel:
         """Alias matching UserRepository interface."""

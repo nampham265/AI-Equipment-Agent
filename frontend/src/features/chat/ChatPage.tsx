@@ -275,13 +275,25 @@ export function ChatPage() {
         timestamp: new Date(),
       }
 
+      const updatedPreviousEntries = response.action
+        ? currentEntries.map((e) => {
+            if (response.action?.type === 'show_return_form' && e.action?.type === 'show_return_form') {
+              return { ...e, returnDismissed: true }
+            }
+            if (response.action?.type === 'show_borrow_form' && e.action?.type === 'show_borrow_form') {
+              return { ...e, formDismissed: true }
+            }
+            return e
+          })
+        : currentEntries
+
       setSessions((prev) =>
         prev.map((s) =>
           s.id === activeSession.id
             ? {
                 ...s,
                 updatedAt: new Date().toISOString(),
-                entries: [...currentEntries, assistantEntry],
+                entries: [...updatedPreviousEntries, assistantEntry],
               }
             : s
         )

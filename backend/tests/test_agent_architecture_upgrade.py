@@ -98,8 +98,9 @@ def test_external_sourcing_sanitizes_query():
     assert "CANInterface" in cleaned or "XYZ" in cleaned
 
 
-def test_external_sourcing_disabled_by_default(user_client):
+def test_external_sourcing_disabled_by_default(user_client, monkeypatch):
     """When ENABLE_EXTERNAL_SOURCING=False, chat gives honest explanation without hallucination."""
+    monkeypatch.setattr(settings, "ENABLE_EXTERNAL_SOURCING", False)
     res = user_client.post(
         "/api/agent/message",
         json={
@@ -111,8 +112,26 @@ def test_external_sourcing_disabled_by_default(user_client):
     data = res.json()
     reply = data["reply"]
     trace = data.get("trace", {})
-    assert "chưa được kích hoạt" in reply or "cấu hình" in reply or "chưa sẵn sàng" in reply
+    assert "chưa được kích hoạt" in reply or "cấu hình" in reply or "chưa sẵn sàng" in reply or "đang tắt" in reply
     assert trace.get("selected_tool") == "external_sourcing_search"
+
+
+def test_external_sourcing_enabled_returns_market_info(user_client, monkeypatch):
+    """When ENABLE_EXTERNAL_SOURCING=True, chat provides external supplier and pricing guide."""
+    monkeypatch.setattr(settings, "ENABLE_EXTERNAL_SOURCING", True)
+    res = user_client.post(
+        "/api/agent/message",
+        json={
+            "message": "Tìm giúp mình nơi mua connector ngoài thị trường kèm giá tham khảo",
+            "conversation_id": "conv-external-sourcing-enabled",
+        },
+    )
+    assert res.status_code == 200
+    data = res.json()
+    reply = data["reply"]
+    trace = data.get("trace", {})
+    assert trace.get("selected_tool") == "external_sourcing_search"
+    assert any(w in reply.lower() for w in ["digikey", "mouser", "lcsc", "thế giới ic", "nhà phân phối", "mua hàng", "purchasing"])
 
 
 # ---------------------------------------------------------------------------

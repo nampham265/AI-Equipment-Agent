@@ -50,6 +50,14 @@ def calculate_overlap_duration(start_a: date, end_a: date, start_b: date, end_b:
     return overlap_days, duration_str, str(o_start), str(o_end)
 
 
+def format_date_vn(d: Any) -> str:
+    """Format string or date object to Vietnamese DD/MM/YYYY string."""
+    parsed = parse_date(d)
+    if parsed:
+        return parsed.strftime("%d/%m/%Y")
+    return str(d) if d else ""
+
+
 class ConflictService:
     """Deterministic schedule conflict calculation service."""
 
@@ -181,7 +189,12 @@ class ConflictService:
                         "project_a": getattr(first_r, "project", ""),
                         "needed_from_a": str(f_start),
                         "needed_to_a": str(f_end),
+                        "needed_from_a_vn": format_date_vn(f_start),
+                        "needed_to_a_vn": format_date_vn(f_end),
                         "status_a": getattr(first_r, "status", ""),
+                        "quantity_a": getattr(first_r, "quantity", 1),
+                        "priority_level_a": getattr(first_r, "final_priority_level", None) or getattr(first_r, "priority_level", "Medium"),
+                        "purpose_a": getattr(first_r, "purpose", ""),
 
                         # Request B
                         "request_id_b": second_id_str,
@@ -191,7 +204,12 @@ class ConflictService:
                         "project_b": getattr(second_r, "project", ""),
                         "needed_from_b": str(s_start),
                         "needed_to_b": str(s_end),
+                        "needed_from_b_vn": format_date_vn(s_start),
+                        "needed_to_b_vn": format_date_vn(s_end),
                         "status_b": getattr(second_r, "status", ""),
+                        "quantity_b": getattr(second_r, "quantity", 1),
+                        "priority_level_b": getattr(second_r, "final_priority_level", None) or getattr(second_r, "priority_level", "Medium"),
+                        "purpose_b": getattr(second_r, "purpose", ""),
 
                         # Overlap details
                         "overlap_days": overlap_days,
@@ -208,12 +226,22 @@ class ConflictService:
                         "needed_from": str(f_start),
                         "needed_to": str(f_end),
                         "status": getattr(first_r, "status", ""),
+                        "quantity": getattr(first_r, "quantity", 1),
+                        "priority_level": getattr(first_r, "final_priority_level", None) or getattr(first_r, "priority_level", "Medium"),
+                        "purpose": getattr(first_r, "purpose", ""),
                         "conflicting_with_id": second_id_str,
                         "conflicting_requester_name": getattr(second_r, "requester_name", ""),
                         "conflicting_project": getattr(second_r, "project", ""),
                         "conflicting_needed_from": str(s_start),
                         "conflicting_needed_to": str(s_end),
                         "conflicting_status": getattr(second_r, "status", ""),
+                        "conflicting_quantity": getattr(second_r, "quantity", 1),
+                        "conflicting_priority_level": getattr(second_r, "final_priority_level", None) or getattr(second_r, "priority_level", "Medium"),
+                        "conflicting_purpose": getattr(second_r, "purpose", ""),
+
+                        # Object references for backward compatibility with agent tool inspection
+                        "pending_request": first_r,
+                        "conflicting_requests": [second_r],
                     }
                     pairs.append(record)
 

@@ -70,7 +70,20 @@ def create_request(
         "requester_name": current_user.user_name,
         "requester_email": current_user.user_email,
     })
-    return request_svc.create_request(body_with_user)
+    try:
+        return request_svc.create_request(body_with_user)
+    except Exception as exc:
+        if "ExcelFileLockedError" in type(exc).__name__:
+            raise HTTPException(
+                status_code=status.HTTP_423_LOCKED,
+                detail=str(exc),
+            ) from exc
+        if isinstance(exc, PermissionError):
+            raise HTTPException(
+                status_code=status.HTTP_423_LOCKED,
+                detail="Tệp dữ liệu Excel hiện đang bị khóa bởi ứng dụng khác (ví dụ: Microsoft Excel). Vui lòng lưu và đóng file Excel trên máy tính rồi thử lại.",
+            ) from exc
+        raise
 
 
 @router.get("/mine", response_model=list[RequestRead])
@@ -108,6 +121,7 @@ def submit_return(
         return_condition=body.return_condition,
         return_condition_note=body.return_condition_note,
         actor_email=current_user.user_email,
+        quantity=body.quantity,
     )
 
 
@@ -125,4 +139,5 @@ def mark_returned(
         return_condition=body.return_condition if body else "Nguyên trạng như khi nhận",
         return_condition_note=body.return_condition_note if body else "",
         actor_email=current_user.user_email if not current_user.is_manager else None,
+        quantity=body.quantity if body else None,
     )

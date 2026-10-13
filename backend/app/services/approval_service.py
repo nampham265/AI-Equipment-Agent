@@ -157,6 +157,7 @@ class ApprovalService:
         return_condition: str | None = None,
         return_condition_note: str | None = None,
         actor_email: str | None = None,
+        quantity: int | None = None,
     ) -> RequestRead:
         r = self._get_or_404(request_id)
         if actor_email and r.requester_email and r.requester_email.strip().lower() != actor_email.strip().lower():
@@ -164,10 +165,86 @@ class ApprovalService:
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Bạn chỉ có thể hoàn trả các yêu cầu mượn của chính mình.",
             )
+        if r.status != RequestStatus.BORROWED.value:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"Không thể hoàn trả yêu cầu đang ở trạng thái '{r.status}'. Chỉ các yêu cầu đang mượn (Borrowed) mới có thể trả.",
+            )
+        if quantity is not None:
+            if quantity <= 0:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Số lượng hoàn trả phải lớn hơn 0.",
+                )
+            if quantity > r.quantity:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Số lượng hoàn trả ({quantity}) không thể lớn hơn số lượng đang mượn ({r.quantity}).",
+                )
+
+        now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+        # Check for partial return
+        if quantity is not None and 0 < quantity < r.quantity:
+            # Create a clone of r for the returned portion
+            if hasattr(r, "__table__"):
+                returned_req = RequestModel(
+                    requester_name=r.requester_name,
+                    requester_email=r.requester_email,
+                    project=r.project,
+                    equipment_id=r.equipment_id,
+                    quantity=quantity,
+                    needed_from=r.needed_from,
+                    needed_to=r.needed_to,
+                    purpose=r.purpose,
+                    priority_level=r.priority_level,
+                    priority_reason=r.priority_reason,
+                    status=RequestStatus.RETURNED.value,
+                    return_condition=return_condition or "Nguyên trạng như khi nhận",
+                    return_condition_note=return_condition_note or "",
+                    returned_at=now_iso,
+                    created_at=r.created_at,
+                    modified_at=now_iso,
+                )
+                self._repo.create(returned_req)
+            else:
+                from app.models.excel_request import ExcelRequestModel
+                returned_req = ExcelRequestModel(
+                    request_id="",
+                    requester_name=r.requester_name,
+                    requester_email=r.requester_email,
+                    project=r.project,
+                    equipment_id=r.equipment_id,
+                    equipment_name=r.equipment_name,
+                    quantity=quantity,
+                    needed_from=r.needed_from,
+                    needed_to=r.needed_to,
+                    purpose=r.purpose,
+                    priority_level=r.priority_level,
+                    priority_reason=r.priority_reason,
+                    status=RequestStatus.RETURNED.value,
+                    return_condition=return_condition or "Nguyên trạng như khi nhận",
+                    return_condition_note=return_condition_note or "",
+                    returned_at=now_iso,
+                    created_at=r.created_at,
+                    updated_at=now_iso,
+                )
+                self._repo.create(returned_req)
+
+            # Update existing borrowed record with remaining quantity
+            r.quantity -= quantity
+            if hasattr(r, "modified_at"):
+                r.modified_at = now_iso
+            if hasattr(r, "updated_at"):
+                r.updated_at = now_iso
+            updated_loan = self._repo.update(r)
+            return _to_read(updated_loan)
+
+        # Full return
         if return_condition:
             r.return_condition = return_condition
         if return_condition_note is not None:
             r.return_condition_note = return_condition_note
-        r.returned_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        r.returned_at = now_iso
         r = self._transition(r, RequestStatus.RETURNED.value)
         return _to_read(r)

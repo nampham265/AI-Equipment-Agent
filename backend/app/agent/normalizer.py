@@ -318,6 +318,53 @@ def parse_dates_vietnamese(text: str) -> Tuple[Optional[str], Optional[str]]:
     return (None, None)
 
 
+def normalize_return_condition(text: str) -> Optional[str]:
+    """Normalize user natural language into one of the 6 official ReturnCondition values:
+    - 'Nguyên trạng như khi nhận'
+    - 'Có hao mòn nhẹ, vẫn sử dụng bình thường'
+    - 'Hư hỏng nhẹ'
+    - 'Hư hỏng nặng'
+    - 'Hư hỏng nhưng đã khắc phục'
+    - 'Cần kiểm tra thêm'
+    Returns None if no condition mentioned.
+    """
+    t = text.lower()
+
+    if any(k in t for k in [
+        "hư hỏng nhưng đã khắc phục", "đã khắc phục", "sửa xong", "đã sửa", "hỏng đã sửa", "đã fix"
+    ]):
+        return "Hư hỏng nhưng đã khắc phục"
+
+    if any(k in t for k in [
+        "hư hỏng nặng", "hỏng nặng", "bị vỡ", "gãy", "cháy", "hỏng hoàn toàn", "không lên nguồn"
+    ]):
+        return "Hư hỏng nặng"
+
+    if any(k in t for k in [
+        "hư hỏng nhẹ", "hỏng nhẹ", "lỗi nhẹ", "chập chờn", "hư nhẹ"
+    ]):
+        return "Hư hỏng nhẹ"
+
+    if any(k in t for k in [
+        "hao mòn nhẹ", "mòn nhẹ", "trầy xước nhẹ", "trầy nhẹ", "xước nhẹ", "hơi trầy", "hơi xước", "hao mòn"
+    ]):
+        return "Có hao mòn nhẹ, vẫn sử dụng bình thường"
+
+    if any(k in t for k in [
+        "cần kiểm tra thêm", "cần kiểm tra", "chưa rõ", "chưa kiểm tra", "nghi ngờ lỗi", "không chắc"
+    ]):
+        return "Cần kiểm tra thêm"
+
+    if any(k in t for k in [
+        "nguyên vẹn", "nguyên trạng", "còn nguyên", "không hư hỏng", "không bị hỏng",
+        "hoạt động tốt", "dùng tốt", "bình thường", "như ban đầu", "như lúc nhận",
+        "mới nguyên"
+    ]) or re.search(r"\btốt\b", t):
+        return "Nguyên trạng như khi nhận"
+
+    return None
+
+
 def extract_condition_notes(text: str) -> Optional[str]:
     """Extract equipment condition notes from return requests.
     Example: 'thiết bị còn hoạt động tốt và không bị trầy xước'
@@ -331,7 +378,7 @@ def extract_condition_notes(text: str) -> Optional[str]:
         c = m.group(0).strip()
         # Clean leading words if captured
         clean = re.sub(r"^(?:mình|tôi|em)?\s*(?:muốn|cần)?\s*trả\s*(?:thiết\s*bị\s*)?(?:đơn\s*(?:số|#)?\s*\d+\s*)?[,:-]?\s*", "", c, flags=re.IGNORECASE).strip()
-        if len(clean) >= 4 and any(w in clean.lower() for w in ["tốt", "bình thường", "trầy", "xước", "hỏng", "mới", "hoạt động"]):
+        if len(clean) >= 4 and any(w in clean.lower() for w in ["tốt", "bình thường", "trầy", "xước", "hỏng", "mới", "hoạt động", "nguyên"]):
             return clean
     return None
 
@@ -349,12 +396,15 @@ def extract_borrow_fields(text: str) -> dict:
     if d_to:
         fields["needed_to"] = d_to
 
-    # 2. Condition notes (for return flow)
+    # 2. Condition notes and condition normalization (for return flow)
     cond = extract_condition_notes(text)
     if cond:
         fields["condition_notes"] = cond
+    ret_cond = normalize_return_condition(text)
+    if ret_cond:
+        fields["return_condition"] = ret_cond
 
-    # 3. Clean string for quantity extraction: strip dates, project, condition, IDs
+    # 3. Clean string for quantity extraction: strip dates, project, condition, IDs, and ordinals
     text_clean = text
     if d_from and d_to:
         text_clean = re.sub(r"từ\s+.*?đến\s+[^,.\n]+", "", text_clean, flags=re.IGNORECASE)
@@ -363,13 +413,20 @@ def extract_borrow_fields(text: str) -> dict:
         text_clean = text_clean.replace(cond, "")
     text_no_ids = EQUIPMENT_ID_PATTERN.sub("", text_clean)
     text_no_dates = re.sub(r"\d{1,2}[/-]\d{1,2}(?:[/-]\d{2,4})?", "", text_no_ids)
+
+    # Strip ordinals first so "cái thứ 1" or "đơn thứ 2" is not mistaken for a quantity
+    text_no_ordinals = re.sub(r"(?:cái|thiết\s*bị|đơn|item|sản\s*phẩm)?\s*(?:thứ|số)\s*\d+", "", text_no_dates, flags=re.IGNORECASE)
+    text_no_ordinals = re.sub(r"\b(thứ\s*(?:nhất|hai|ba|tư|năm)|đầu\s*tiên|cái\s*đầu)\b", "", text_no_ordinals, flags=re.IGNORECASE)
     
-    # Match quantity patterns
-    m_qty_explicit = re.search(r"(?:mượn|cần|lấy|số\s*lượng)\s*(\d+)", text_no_dates, re.IGNORECASE)
-    if m_qty_explicit:
+    # Match quantity patterns: "cả 2 cái", "cả 2", "mượn 3 cái", "trả 2 cái", "đổi thành 1 cái"
+    m_qty_all = re.search(r"\bcả\s*(\d+)\s*(?:cái|chiếc|bộ|con|pcs)?\b", text_no_ordinals, re.IGNORECASE)
+    m_qty_explicit = re.search(r"(?:mượn|cần|lấy|trả|hoàn\s*trả|số\s*lượng|đổi\s*thành)\s*(\d+)", text_no_ordinals, re.IGNORECASE)
+    if m_qty_all:
+        fields["quantity"] = int(m_qty_all.group(1))
+    elif m_qty_explicit:
         fields["quantity"] = int(m_qty_explicit.group(1))
     else:
-        m_qty_unit = re.search(r"\b(\d+)\s*(?:cái|chiếc|bộ|con|pcs)\b", text_no_dates, re.IGNORECASE)
+        m_qty_unit = re.search(r"\b(\d+)\s*(?:cái|chiếc|bộ|con|pcs)\b", text_no_ordinals, re.IGNORECASE)
         if m_qty_unit:
             fields["quantity"] = int(m_qty_unit.group(1))
 

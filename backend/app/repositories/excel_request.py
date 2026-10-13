@@ -52,6 +52,12 @@ from app.repositories.base import RequestRepository
 
 logger = logging.getLogger(__name__)
 
+
+class ExcelFileLockedError(RuntimeError):
+    """Raised when the Excel workbook is locked or in use by another process."""
+    pass
+
+
 _SHEET_NAME = "Equipment_Requests"
 _REQUIRED_COLUMNS = [
     "RequestID",
@@ -242,15 +248,25 @@ class ExcelRequestRepository(RequestRepository):
                 pass
 
         last_err = None
-        for attempt in range(5):
+        for attempt in range(8):
             try:
                 os.replace(tmp_path, self._path)
                 return
-            except PermissionError as pe:
+            except (PermissionError, OSError) as pe:
                 last_err = pe
-                time.sleep(0.05 * (attempt + 1))
+                time.sleep(0.1 * (attempt + 1))
+
+        if tmp_path.exists():
+            try:
+                tmp_path.unlink()
+            except Exception:
+                pass
+
         if last_err:
-            raise last_err
+            raise ExcelFileLockedError(
+                f"Tệp dữ liệu Excel '{self._path.name}' hiện đang bị khóa hoặc được mở bởi ứng dụng khác (ví dụ: Microsoft Excel). "
+                "Vui lòng lưu và đóng file Excel trên máy tính rồi thử lại."
+            ) from last_err
 
     def _load_all_rows(self) -> list[ExcelRequestModel]:
         wb = self._load_workbook()

@@ -58,6 +58,20 @@ app.include_router(health_router.router)
 app.include_router(auth_router)
 
 # ---------------------------------------------------------------------------
+# Exception Handlers
+# ---------------------------------------------------------------------------
+from fastapi.responses import JSONResponse
+from fastapi import Request
+from app.repositories.excel_request import ExcelFileLockedError
+
+@app.exception_handler(ExcelFileLockedError)
+def excel_file_locked_handler(request: Request, exc: ExcelFileLockedError):
+    return JSONResponse(
+        status_code=423,
+        content={"detail": str(exc)},
+    )
+
+# ---------------------------------------------------------------------------
 # Startup
 # ---------------------------------------------------------------------------
 

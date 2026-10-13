@@ -22,6 +22,9 @@ class RequestModel(Base):
     priority_level: Mapped[str] = mapped_column(String, nullable=False, default="Needs review")
     priority_reason: Mapped[str] = mapped_column(Text, nullable=False, default="")
     status: Mapped[str] = mapped_column(String, nullable=False, default="Pending", index=True)
+    return_condition: Mapped[str | None] = mapped_column(String, nullable=True)
+    return_condition_note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    returned_at: Mapped[str | None] = mapped_column(String, nullable=True)
     created_at: Mapped[str] = mapped_column(String, nullable=False)   # ISO datetime string
     modified_at: Mapped[str] = mapped_column(String, nullable=False)  # ISO datetime string
 

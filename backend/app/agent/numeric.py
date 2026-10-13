@@ -39,10 +39,17 @@ class NumericExplanation:
 
         # When requested quantity <= total inventory, but date range is not specified
         if not has_date_range:
+            if requested_quantity <= available_quantity:
+                return (
+                    f"Kho hiện có sẵn **{available_quantity} {unit}** `{equipment_id}` khả dụng "
+                    f"(tổng tồn kho: {total_quantity} {unit}), hoàn toàn đủ đáp ứng số lượng **{requested_quantity} {unit}** bạn cần "
+                    f"trong khoảng thời gian hiện tại."
+                )
+            shortage = requested_quantity - available_quantity
             return (
-                f"Kho hiện ghi nhận tổng cộng {total_quantity} {unit} {equipment_id}. "
-                f"Tuy nhiên, hệ thống hiện chưa có đủ dữ liệu mượn/trả để xác nhận số lượng thực tế "
-                f"đang sẵn sàng trong khoảng thời gian bạn cần."
+                f"Kho hiện chỉ còn **{available_quantity} {unit}** `{equipment_id}` khả dụng "
+                f"(tổng tồn kho: {total_quantity} {unit}), không đủ số lượng **{requested_quantity} {unit}** bạn cần "
+                f"(thiếu {shortage} {unit}) trong khoảng thời gian hiện tại."
             )
 
         # When date range is specified and checked
@@ -78,10 +85,17 @@ class NumericExplanation:
             )
 
         if not has_date_range:
+            if requested_quantity <= available_quantity:
+                return (
+                    f"Kho hiện có sẵn **{available_quantity} {unit}** `{equipment_id}` khả dụng "
+                    f"(tổng tồn kho: {total_quantity} {unit}), hoàn toàn đủ đáp ứng số lượng **{requested_quantity} {unit}** bạn cần "
+                    f"trong khoảng thời gian hiện tại."
+                )
+            shortage = requested_quantity - available_quantity
             return (
-                f"Kho hiện ghi nhận tổng cộng {total_quantity} {unit} {equipment_id}. "
-                f"Tuy nhiên, hệ thống hiện chưa có đủ dữ liệu mượn/trả để xác nhận số lượng thực tế "
-                f"đang sẵn sàng trong khoảng thời gian bạn cần."
+                f"Kho hiện chỉ còn **{available_quantity} {unit}** `{equipment_id}` khả dụng "
+                f"(tổng tồn kho: {total_quantity} {unit}), không đủ số lượng **{requested_quantity} {unit}** bạn cần "
+                f"(thiếu {shortage} {unit}) trong khoảng thời gian hiện tại."
             )
 
         if requested_quantity <= available_quantity:

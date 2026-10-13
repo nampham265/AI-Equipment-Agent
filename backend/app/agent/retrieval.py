@@ -9,6 +9,23 @@ from app.repositories.base import EquipmentRepository
 from app.schemas.equipment import EquipmentRead
 
 
+GENERIC_HARDWARE_NOUNS = {
+    "module", "board", "cáp", "cable", "dây", "cảm biến", "sensor",
+    "thiết bị", "device", "mạch", "đầu nối", "connector", "jack",
+    "giắc", "nguồn", "power", "nút", "button", "công tắc", "switch"
+}
+
+
+def _sanitize_technical_text(text: str) -> str:
+    """Filter out Vietnamese prose phrases that collide with technical protocol acronyms like CAN bus."""
+    if not text:
+        return ""
+    # "can thiệp", "can dự", "can ngăn", "ngăn can", "can đảm", "can cớ" are Vietnamese prose, not CAN protocol
+    cleaned = re.sub(r"\bcan\s+(?:thiệp|dự|ngăn|đảm|cớ)\b", "", text, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\bngăn\s+can\b", "", cleaned, flags=re.IGNORECASE)
+    return cleaned
+
+
 class HybridRetrievalService:
     """Multi-constraint deterministic inventory search engine."""
 
@@ -105,7 +122,8 @@ class HybridRetrievalService:
 
     def _matches_constraints(self, item: EquipmentRead, c: ExtractedConstraints) -> bool:
         """Verify hard filters: location, geometry, size_mm, pins, category, color, gender."""
-        full_text = f"{item.equipment_id} {item.equipment_name} {item.category or ''} {item.description or ''} {item.location or ''}".lower()
+        desc_clean = _sanitize_technical_text(item.description or "")
+        full_text = f"{item.equipment_id} {item.equipment_name} {item.category or ''} {desc_clean} {item.location or ''}".lower()
 
         # Location filter
         if c.location:
@@ -197,28 +215,47 @@ class HybridRetrievalService:
 
         # If user specified specific search keywords, candidate MUST match distinctive keywords
         if c.keywords:
-            c_kws_lower = [k.lower() for k in c.keywords]
+            c_kws_lower = [k.lower().strip() for k in c.keywords if k.strip()]
+            all_tokens = set()
+            for k in c_kws_lower:
+                all_tokens.update(re.findall(r"[A-Za-z0-9_À-ỹ]+", k))
+
             primary_text = f"{item.equipment_id} {item.equipment_name} {item.category or ''}".lower()
 
-            if "interface" in c_kws_lower and not re.search(r"\binterface\b", full_text):
-                return False
-            if "banana" in c_kws_lower and not re.search(r"\bbanana\b", full_text):
+            # Rule for Banana jumper: If query mentions banana, candidate primary_text MUST have banana
+            if "banana" in all_tokens:
+                if not re.search(r"\bbanana\b", primary_text):
+                    return False
+
+            if "interface" in all_tokens and not re.search(r"\binterface\b", full_text):
                 return False
 
-            # Specific rule for ABS: must be in primary_text (ECU ABS, Connector ABS), not incidental description mention
-            if "abs" in c_kws_lower and not re.search(r"\babs\b", primary_text):
+            if "abs" in all_tokens and not re.search(r"\babs\b", primary_text):
                 return False
 
-            # If searching for banana jumper, must match banana in primary_text
-            if "banana" in c_kws_lower and "jumper" in c_kws_lower and not re.search(r"\bbanana\b", primary_text):
-                return False
-
-            matched_kw_count = 0
-            for kw in c_kws_lower:
-                if re.search(rf"\b{re.escape(kw)}\b", full_text):
-                    matched_kw_count += 1
-            if matched_kw_count == 0:
-                return False
+            # Distinctive hardware keywords: If hardware noun is specified, it cannot be satisfied by just a color or stopword
+            color_words = {"đỏ", "đen", "trắng", "vàng", "tím", "xanh", "red", "black", "white", "yellow", "blue", "màu"}
+            hw_tokens = [tok for tok in all_tokens if tok not in color_words and len(tok) >= 2]
+            if hw_tokens:
+                # Separate distinctive tokens from generic hardware form-factor words (e.g. 'can' vs 'module')
+                distinctive_tokens = [tok for tok in hw_tokens if tok not in GENERIC_HARDWARE_NOUNS]
+                if distinctive_tokens:
+                    # Candidate must match at least one DISTINCTIVE technical token in full_text
+                    distinctive_matched = any(re.search(rf"\b{re.escape(tok)}\b", full_text) for tok in distinctive_tokens)
+                    if not distinctive_matched:
+                        return False
+                else:
+                    # Only generic tokens provided (e.g. user just searched 'module' or 'cable')
+                    hw_matched = any(re.search(rf"\b{re.escape(tok)}\b", full_text) for tok in hw_tokens)
+                    if not hw_matched:
+                        return False
+            else:
+                matched_kw_count = 0
+                for kw in c_kws_lower:
+                    if re.search(rf"\b{re.escape(kw)}\b", full_text):
+                        matched_kw_count += 1
+                if matched_kw_count == 0:
+                    return False
 
         return True
 
@@ -231,9 +268,10 @@ class HybridRetrievalService:
         """Calculate lexical and constraint relevance score."""
         score = 15.0  # Base score for passing hard filters
 
-        full_text = f"{item.equipment_id} {item.equipment_name} {item.category or ''} {item.description or ''} {item.location or ''}".lower()
+        desc_clean = _sanitize_technical_text(item.description or "")
+        full_text = f"{item.equipment_id} {item.equipment_name} {item.category or ''} {desc_clean} {item.location or ''}".lower()
         primary_text = f"{item.equipment_id} {item.equipment_name} {item.category or ''}".lower()
-        desc_text = (item.description or "").lower()
+        desc_text = desc_clean.lower()
 
         # Bonus for keywords matching primary text vs description
         if c.keywords:

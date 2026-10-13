@@ -38,7 +38,7 @@ class Settings(BaseSettings):
 
     # Agent Routing & Capabilities Configuration
     AGENT_ROUTING_MODE: str = "llm_primary"  # "llm_primary" | "llm_shadow" | "legacy_only"
-    ENABLE_EXTERNAL_SOURCING: bool = False
+    ENABLE_EXTERNAL_SOURCING: bool = True
     LOW_STOCK_THRESHOLD: int = 5
 
     # Microsoft Entra / Graph

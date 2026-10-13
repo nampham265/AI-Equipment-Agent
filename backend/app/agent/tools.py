@@ -461,23 +461,31 @@ class AgentTools:
         return list(grouped.values())
 
     def get_schedule_conflicts(self) -> list[dict[str, Any]]:
-        """Find pending requests that overlap with existing approved/borrowed requests."""
-        pending = self.request_repo.list_all(status="Pending")
-        conflicts = []
-        for p in pending:
-            overlapping = self.request_repo.get_overlapping(
-                equipment_id=p.equipment_id,
-                needed_from=p.needed_from,
-                needed_to=p.needed_to,
-                statuses=["Approved", "Borrowed"],
-                exclude_id=p.id,
+        """Find unique schedule conflict pairs using the deterministic ConflictService.
+
+        Ensures perfect reconciliation with the Manager Dashboard KPI:
+        - Evaluates canonical conflict pairs without duplicate fixture inflation
+        - Calculates total equipment stock to assist in conflict resolution
+        - Enriches each record with priority levels, purposes, and date ranges
+        """
+        all_requests = self.request_repo.list_all()
+        all_eq = self.equipment_repo.list_all()
+        eq_map = {eq.equipment_id: eq.equipment_name for eq in all_eq}
+        stock_map = {
+            eq.equipment_id: (
+                getattr(eq, "quantity_total", None)
+                if getattr(eq, "quantity_total", None) is not None
+                else getattr(eq, "quantity", 0)
             )
-            if overlapping:
-                conflicts.append({
-                    "pending_request": p,
-                    "conflicting_requests": overlapping,
-                })
-        return conflicts
+            for eq in all_eq
+        }
+        from app.services.conflict_service import ConflictService
+
+        conflict_svc = ConflictService()
+        pairs = conflict_svc.find_conflict_pairs(all_requests, eq_map)
+        for p in pairs:
+            p["total_stock"] = stock_map.get(p.get("equipment_id"), 0)
+        return pairs
 
     def get_request_detail(self, request_id: int) -> Optional[RequestRead]:
         """Get detail of a specific request."""

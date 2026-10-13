@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import type { RequestRead } from '../../types'
 import { extractErrorMessage } from '../../lib/api'
 
@@ -9,6 +9,9 @@ export interface ReturnFormPrefill {
   equipment_name: string
   project: string
   quantity: number
+  max_quantity?: number
+  return_condition?: string
+  return_condition_note?: string
   needed_from?: string
   needed_to?: string
 }
@@ -31,10 +34,24 @@ const RETURN_CONDITIONS = [
 const ATTENTION_CONDITIONS = new Set(['Hư hỏng nhẹ', 'Hư hỏng nặng', 'Cần kiểm tra thêm'])
 
 export function ReturnForm({ prefill, onSubmitted, onCancel }: Props) {
-  const [returnCondition, setReturnCondition] = useState<string>('')
-  const [returnConditionNote, setReturnConditionNote] = useState<string>('')
+  const maxQty = prefill.max_quantity || prefill.quantity || 1
+  const [returnQuantity, setReturnQuantity] = useState<number>(prefill.quantity || maxQty)
+  const [returnCondition, setReturnCondition] = useState<string>(prefill.return_condition || '')
+  const [returnConditionNote, setReturnConditionNote] = useState<string>(prefill.return_condition_note || '')
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
+
+  useEffect(() => {
+    if (prefill.quantity !== undefined) {
+      setReturnQuantity(prefill.quantity)
+    }
+    if (prefill.return_condition) {
+      setReturnCondition(prefill.return_condition)
+    }
+    if (prefill.return_condition_note !== undefined) {
+      setReturnConditionNote(prefill.return_condition_note || '')
+    }
+  }, [prefill])
 
   const needsAttention = ATTENTION_CONDITIONS.has(returnCondition)
 
@@ -42,6 +59,10 @@ export function ReturnForm({ prefill, onSubmitted, onCancel }: Props) {
     e.preventDefault()
     if (!returnCondition) {
       setError('Vui lòng chọn tình trạng khi trả.')
+      return
+    }
+    if (returnQuantity < 1 || returnQuantity > maxQty) {
+      setError(`Số lượng trả phải từ 1 đến ${maxQty}.`)
       return
     }
     setSubmitting(true)
@@ -53,6 +74,7 @@ export function ReturnForm({ prefill, onSubmitted, onCancel }: Props) {
         body: JSON.stringify({
           return_condition: returnCondition,
           return_condition_note: returnConditionNote.trim() || null,
+          quantity: returnQuantity,
         }),
         credentials: 'include',
       })
@@ -112,9 +134,6 @@ export function ReturnForm({ prefill, onSubmitted, onCancel }: Props) {
             <span style={{ color: 'var(--color-text-muted)', fontWeight: 500 }}>Dự án:</span>
             <span>{prefill.project}</span>
 
-            <span style={{ color: 'var(--color-text-muted)', fontWeight: 500 }}>Số lượng trả:</span>
-            <span style={{ fontWeight: 600 }}>{prefill.quantity} cái</span>
-
             {prefill.needed_from && prefill.needed_to && (
               <>
                 <span style={{ color: 'var(--color-text-muted)', fontWeight: 500 }}>Thời gian mượn:</span>
@@ -124,6 +143,63 @@ export function ReturnForm({ prefill, onSubmitted, onCancel }: Props) {
               </>
             )}
           </div>
+        </div>
+      </div>
+
+      {/* Editable quantity stepper */}
+      <div className="form-group">
+        <label className="form-label" htmlFor="return-quantity">
+          Số lượng hoàn trả <span style={{ color: 'var(--color-danger)' }}>*</span>
+        </label>
+        <p className="form-hint" style={{ marginBottom: '0.4rem', fontSize: '0.82rem', color: 'var(--color-text-muted)' }}>
+          Hỗ trợ hoàn trả toàn bộ hoặc trả từng phần (1 đến {maxQty} cái).
+        </p>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+          <button
+            type="button"
+            className="btn btn--outline"
+            style={{ width: 36, height: 36, padding: 0, fontWeight: 700 }}
+            onClick={() => setReturnQuantity((prev) => Math.max(1, prev - 1))}
+            disabled={submitting || returnQuantity <= 1}
+            aria-label="Giảm số lượng trả"
+          >
+            -
+          </button>
+          <input
+            id="return-quantity"
+            type="number"
+            className="form-control"
+            style={{ width: 85, textAlign: 'center', fontWeight: 600 }}
+            min={1}
+            max={maxQty}
+            value={returnQuantity}
+            onChange={(e) => {
+              const val = parseInt(e.target.value, 10)
+              if (!isNaN(val)) {
+                setReturnQuantity(Math.min(maxQty, Math.max(1, val)))
+              }
+            }}
+            disabled={submitting}
+            required
+          />
+          <button
+            type="button"
+            className="btn btn--outline"
+            style={{ width: 36, height: 36, padding: 0, fontWeight: 700 }}
+            onClick={() => setReturnQuantity((prev) => Math.min(maxQty, prev + 1))}
+            disabled={submitting || returnQuantity >= maxQty}
+            aria-label="Tăng số lượng trả"
+          >
+            +
+          </button>
+          <span style={{ fontSize: '0.85rem', color: 'var(--color-text-muted)' }}>
+            / Tổng đang mượn {maxQty} cái
+            {returnQuantity < maxQty && (
+              <span style={{ color: 'var(--color-primary)', fontWeight: 600, marginLeft: 8 }}>
+                (Trả từng phần {returnQuantity}/{maxQty})
+              </span>
+            )}
+          </span>
         </div>
       </div>
 

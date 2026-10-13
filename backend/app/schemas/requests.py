@@ -98,6 +98,7 @@ class ReturnSubmitRequest(BaseModel):
     """Payload when user submits a return form."""
     return_condition: str = Field(..., description="Tình trạng khi trả")
     return_condition_note: Optional[str] = Field(default="", description="Ghi chú tình trạng khi trả (tuỳ chọn)")
+    quantity: Optional[int] = Field(default=None, gt=0, description="Số lượng hoàn trả (mặc định trả toàn bộ)")
 
     @model_validator(mode="after")
     def validate_condition(self) -> "ReturnSubmitRequest":

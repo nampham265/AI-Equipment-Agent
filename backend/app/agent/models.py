@@ -143,6 +143,7 @@ class QueryPlan(BaseModel):
     project: Optional[str] = None
     purpose: Optional[str] = None
     condition_notes: Optional[str] = None
+    return_condition: Optional[str] = None
     
     # Request query filter (e.g. "Approved", "Pending", "Borrowed")
     status_filter: Optional[str] = None
@@ -170,6 +171,11 @@ class PendingForm(BaseModel):
     project: str = ""
     purpose: str = ""
     condition_notes: Optional[str] = None
+    request_id: Optional[int] = None
+    display_id: Optional[str] = None
+    return_condition: Optional[str] = None
+    return_condition_note: Optional[str] = None
+    max_quantity: Optional[int] = None
 
 
 class ConversationState(BaseModel):
@@ -181,6 +187,7 @@ class ConversationState(BaseModel):
     active_equipment_ids: list[str] = Field(default_factory=list)
     active_request: Optional[dict[str, Any]] = None    # serialized RequestRead
     active_request_ids: list[int] = Field(default_factory=list)
+    active_person: Optional[str] = None                # e.g. "Nam Phạm"
     last_result_set: list[dict[str, Any]] = Field(default_factory=list) # equipment, requests, or loans
     last_result_type: str = "equipment"  # "equipment" | "request" | "user_requests" | "overdue_loans" | "active_loans" | "active_borrowers"
     last_result_count: int = 0

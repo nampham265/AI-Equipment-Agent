@@ -182,7 +182,8 @@ class GeminiAgentRouter:
                 req_id = state.active_request.get("id") or state.active_request.get("RequestID")
                 context_parts.append(f"Active Request Context: ID={req_id}")
             if state.last_intent:
-                context_parts.append(f"Previous Intent: {state.last_intent.value}")
+                last_intent_val = state.last_intent.value if hasattr(state.last_intent, "value") else str(state.last_intent)
+                context_parts.append(f"Previous Intent: {last_intent_val}")
             if state.last_result_type:
                 context_parts.append(f"Previous Result Type: {state.last_result_type}")
                 context_parts.append(f"Previous Result Count: {state.last_result_count}")
@@ -220,7 +221,7 @@ class GeminiAgentRouter:
             if m not in models_to_try:
                 models_to_try.append(m)
 
-        client = genai.Client(api_key=self._api_key)
+        client = genai.Client(api_key=self._api_key, http_options={"timeout": 15000})
 
         for attempt_idx, model in enumerate(models_to_try):
             try:
