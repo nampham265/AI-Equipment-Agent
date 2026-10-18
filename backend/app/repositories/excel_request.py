@@ -201,12 +201,19 @@ class ExcelRequestRepository(RequestRepository):
             returned_at=cell("ReturnedAt"),
             created_at=cell("CreatedAt") or "",
             updated_at=cell("UpdatedAt") or "",
+            rejection_reason=cell("RejectionReason"),
         )
 
     def _write_model_to_row(
         self, ws, row_num: int, col_idx: dict[str, int], model: ExcelRequestModel
     ) -> None:
         """Write all fields of model into the given worksheet row."""
+        # Auto-create RejectionReason column header if absent
+        if "RejectionReason" not in col_idx:
+            new_col = ws.max_column + 1
+            ws.cell(1, new_col).value = "RejectionReason"
+            col_idx["RejectionReason"] = new_col
+
         mapping = {
             "RequestID": model.request_id,
             "RequesterEmail": model.requester_email,
@@ -229,6 +236,7 @@ class ExcelRequestRepository(RequestRepository):
             "ReturnedAt": model.returned_at,
             "CreatedAt": model.created_at,
             "UpdatedAt": model.updated_at,
+            "RejectionReason": model.rejection_reason,
         }
         for col_name, value in mapping.items():
             idx = col_idx.get(col_name)
@@ -320,6 +328,7 @@ class ExcelRequestRepository(RequestRepository):
                     returned_at=cell("ReturnedAt"),
                     created_at=cell("CreatedAt") or "",
                     updated_at=cell("UpdatedAt") or "",
+                    rejection_reason=cell("RejectionReason"),
                 )
             )
         wb.close()
@@ -385,6 +394,7 @@ class ExcelRequestRepository(RequestRepository):
                     returned_at=getattr(request, "returned_at", None),
                     created_at=now,
                     updated_at=now,
+                    rejection_reason=getattr(request, "rejection_reason", None),
                 )
 
                 # Append to first empty row after data
@@ -464,6 +474,17 @@ class ExcelRequestRepository(RequestRepository):
 
                 now = _now_iso()
 
+                # Allow quantity update if explicitly provided and valid (e.g. partial return)
+                incoming_qty = getattr(request, "quantity", None)
+                if incoming_qty is not None:
+                    try:
+                        parsed_qty = int(incoming_qty)
+                        effective_qty = parsed_qty if parsed_qty > 0 else existing.quantity
+                    except (ValueError, TypeError):
+                        effective_qty = existing.quantity
+                else:
+                    effective_qty = existing.quantity
+
                 updated = ExcelRequestModel(
                     request_id=existing.request_id,
                     requester_email=existing.requester_email,
@@ -471,13 +492,15 @@ class ExcelRequestRepository(RequestRepository):
                     project=existing.project,
                     equipment_id=existing.equipment_id,
                     equipment_name=existing.equipment_name,
-                    quantity=existing.quantity,
+                    quantity=effective_qty,
                     needed_from=existing.needed_from,
                     needed_to=existing.needed_to,
                     purpose=existing.purpose,
                     # AI assessment never modified after creation
                     priority_level=existing.priority_level,
                     priority_reason=existing.priority_reason,
+                    # Manager rejection reason (separate from AI assessment)
+                    rejection_reason=getattr(request, "rejection_reason", existing.rejection_reason),
                     # Manager review fields — use values from incoming if provided
                     final_priority_level=getattr(request, "final_priority_level", existing.final_priority_level),
                     priority_reviewed_by=getattr(request, "priority_reviewed_by", existing.priority_reviewed_by),

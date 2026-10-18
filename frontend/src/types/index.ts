@@ -61,6 +61,7 @@ export interface EquipmentRequest {
   returned_at?: string | null
   created_at: string
   modified_at: string
+  rejection_reason?: string | null
 }
 
 export type RequestRead = EquipmentRequest

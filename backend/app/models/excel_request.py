@@ -43,6 +43,7 @@ class ExcelRequestModel:
     returned_at: Optional[str] = None
     created_at: str = ""   # ISO datetime string
     updated_at: str = ""   # ISO datetime string
+    rejection_reason: Optional[str] = None
 
     # -----------------------------------------------------------------------
     # Computed helpers

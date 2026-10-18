@@ -55,6 +55,7 @@ def _to_read(r) -> RequestRead:
         returned_at=getattr(r, "returned_at", None),
         created_at=str(r.created_at),
         modified_at=str(r.modified_at),
+        rejection_reason=getattr(r, "rejection_reason", None),
     )
 
 

@@ -63,6 +63,7 @@ def _to_read(r) -> RequestRead:
         returned_at=getattr(r, "returned_at", None),
         created_at=str(r.created_at),
         modified_at=str(r.modified_at),
+        rejection_reason=getattr(r, "rejection_reason", None),
     )
 
 
@@ -121,7 +122,7 @@ class ApprovalService:
                 detail="Người yêu cầu không thể tự từ chối yêu cầu mượn của chính mình.",
             )
         if reason:
-            r.priority_reason = (r.priority_reason + f"\n[Từ chối: {reason}]").strip()
+            r.rejection_reason = reason.strip()
         r = self._transition(r, RequestStatus.REJECTED.value)
         self._notify.notify_decision(r, approved=False)
         return _to_read(r)
@@ -205,6 +206,7 @@ class ApprovalService:
                     returned_at=now_iso,
                     created_at=r.created_at,
                     modified_at=now_iso,
+                    rejection_reason=getattr(r, "rejection_reason", None),
                 )
                 self._repo.create(returned_req)
             else:
@@ -228,6 +230,7 @@ class ApprovalService:
                     returned_at=now_iso,
                     created_at=r.created_at,
                     updated_at=now_iso,
+                    rejection_reason=getattr(r, "rejection_reason", None),
                 )
                 self._repo.create(returned_req)
 

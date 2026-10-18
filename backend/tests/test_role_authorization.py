@@ -31,7 +31,7 @@ def mock_excel_app(tmp_path, monkeypatch):
         "Purpose", "PriorityLevel", "PriorityReason", "FinalPriorityLevel",
         "PriorityReviewedBy", "PriorityReviewedAt", "Status",
         "ReturnCondition", "ReturnConditionNote", "ReturnedAt",
-        "CreatedAt", "UpdatedAt"
+        "CreatedAt", "UpdatedAt", "RejectionReason"
     ])
 
     # Users sheet

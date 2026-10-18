@@ -27,6 +27,7 @@ class RequestModel(Base):
     returned_at: Mapped[str | None] = mapped_column(String, nullable=True)
     created_at: Mapped[str] = mapped_column(String, nullable=False)   # ISO datetime string
     modified_at: Mapped[str] = mapped_column(String, nullable=False)  # ISO datetime string
+    rejection_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     @property
     def display_id(self) -> str:

@@ -195,6 +195,20 @@ export function MyRequestsPage() {
                   <td>{formatDate(req.needed_to)}</td>
                   <td>
                     <StatusBadge status={req.status} />
+                    {req.rejection_reason && (
+                      <div
+                        style={{
+                          fontSize: '0.8rem',
+                          color: 'var(--color-danger, #d9383a)',
+                          marginTop: '0.25rem',
+                          maxWidth: '220px',
+                          lineHeight: '1.3',
+                        }}
+                        title={req.rejection_reason}
+                      >
+                        Lý do: {req.rejection_reason}
+                      </div>
+                    )}
                   </td>
                   <td>
                     <div className="action-buttons">

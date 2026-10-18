@@ -535,6 +535,17 @@ export function ManagerDashboard() {
                             </div>
                           )}
 
+                          {req.rejection_reason && (
+                            <div className="expand-panel__section" style={{ borderLeft: '3px solid var(--color-danger, #ef4444)', paddingLeft: '0.75rem' }}>
+                              <div className="expand-panel__label" style={{ color: 'var(--color-danger, #ef4444)' }}>
+                                Lý do từ chối từ Quản lý
+                              </div>
+                              <div className="expand-panel__value" style={{ color: 'var(--color-text, #1f2937)', fontWeight: 500 }}>
+                                {req.rejection_reason}
+                              </div>
+                            </div>
+                          )}
+
                           <div style={{ fontSize: '0.85rem', color: 'var(--color-text-muted)', marginTop: '0.75rem' }}>
                             Gửi lúc: {formatDateTime(req.created_at)} · Cập nhật: {formatDateTime(req.modified_at)}
                           </div>

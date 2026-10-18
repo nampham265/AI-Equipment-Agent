@@ -83,6 +83,7 @@ class RequestRead(BaseModel):
     returned_at: Optional[str] = None
     created_at: str
     modified_at: str
+    rejection_reason: Optional[str] = None
 
 
 class ReturnCondition(str, Enum):
