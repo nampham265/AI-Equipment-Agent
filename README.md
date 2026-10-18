@@ -193,7 +193,7 @@ Bạn có thể copy trực tiếp các câu lệnh mẫu dưới đây vào khu
 ## 6. Kiểm thử Tự động & Đo lường Chi phí
 
 ### 6.1. Chạy Bộ Kiểm thử Backend (Pytest Suite)
-Hệ thống sở hữu bộ kiểm thử tự động toàn diện bao quát 100% các luồng chức năng, phân quyền, xử lý xung đột, máy trạng thái và các kịch bản hồi quy sau sửa lỗi:
+Hệ thống sở hữu bộ kiểm thử tự động toàn diện bao quát 100% các luồng chức năng, phân quyền, xử lý xung đột, máy trạng thái và 26 kịch bản nghiệp vụ thực tế:
 
 ```powershell
 cd backend
@@ -201,7 +201,8 @@ python3.11 -m pytest tests/ -v
 ```
 **Kết quả kiểm thử:**
 - **274/274 tests PASSED (100%)**
-- Bao gồm đầy đủ các bài test phân loại ý định, thuật toán giao cắt thời gian, phân quyền RBAC, kiểm tra toàn vẹn dữ liệu Excel, kiểm thử hồi quy cho lỗi hoàn trả một phần và lưu lý do từ chối.
+- Bao gồm đầy đủ các bài test phân loại ý định, thuật toán giao cắt thời gian, phân quyền RBAC, kiểm tra toàn vẹn dữ liệu Excel, cơ chế hoàn trả một phần và lưu lý do từ chối độc lập.
+- *(Xem chi tiết ma trận kiểm định và bằng chứng kiểm thử tại tệp [`QA_TEST_REPORT.md`](QA_TEST_REPORT.md)).*
 
 ### 6.2. Kiểm tra Build Frontend
 ```powershell
